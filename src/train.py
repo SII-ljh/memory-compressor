@@ -154,6 +154,8 @@ def evaluate_stage1(model, eval_loader, accelerator):
         total_loss += result["loss"].item()
         num_batches += 1
     model.train()
+    if num_batches == 0:
+        logger.warning("Eval loader yielded 0 batches — check eval_samples vs batch_size")
     avg_loss = total_loss / max(num_batches, 1)
     ppl = math.exp(min(avg_loss, 20))  # clamp to avoid overflow
     return avg_loss, ppl
@@ -177,6 +179,8 @@ def evaluate_stage2(model, eval_loader, accelerator):
         total_loss += result["loss"].item()
         num_batches += 1
     model.train()
+    if num_batches == 0:
+        logger.warning("Eval loader yielded 0 batches — check eval_samples vs batch_size")
     avg_loss = total_loss / max(num_batches, 1)
     ppl = math.exp(min(avg_loss, 20))  # clamp to avoid overflow
     return avg_loss, ppl
@@ -265,6 +269,7 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
         num_workers=config.num_workers,
         shuffle=False,
         max_samples=config.eval_samples,
+        drop_last=False,
     )
 
     # LR scheduler
@@ -481,6 +486,7 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         num_workers=config.num_workers,
         shuffle=False,
         max_samples=config.eval_samples,
+        drop_last=False,
     )
 
     # LR scheduler

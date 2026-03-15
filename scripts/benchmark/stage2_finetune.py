@@ -1,0 +1,366 @@
+"""Stage 2 Upper Bound: LoRA fine-tune Qwen3 on SFT QA data.
+
+Fine-tunes Qwen3 with full context + question → answer using LoRA.
+This establishes the ceiling for QCPC Stage 2:
+  - The fine-tuned model sees the entire context without compression.
+  - QCPC compresses context into M memory tokens, so its QA performance
+    should be <= this upper bound.
+
+Input format (from prepare_eval_data.py):
+    [{"context": str, "question": str, "answer": str}, ...]
+
+Training format fed to the model:
+    Input:  "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+    Target: " {answer}"
+
+Usage:
+    python scripts/benchmark/stage2_finetune.py --config config/default.yaml
+    python scripts/benchmark/stage2_finetune.py --config config/default.yaml --epochs 3 --lr 2e-4
+    python scripts/benchmark/stage2_finetune.py --config config/default.yaml --lora_rank 16
+
+Requires: pip install peft
+"""
+
+import argparse
+import json
+import logging
+import math
+import sys
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from tqdm import tqdm
+
+try:
+    from peft import LoraConfig, get_peft_model, TaskType
+except ImportError:
+    print("Error: peft not installed. Run: pip install peft")
+    sys.exit(1)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from src.config import QCPCConfig
+
+logger = logging.getLogger(__name__)
+
+
+PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+
+
+class QAFineTuneDataset(Dataset):
+    """QA dataset for direct Qwen3 fine-tuning.
+
+    Formats each sample as:
+        input:  "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+        target: " {answer}<eos>"
+
+    Returns the full sequence with labels masked on the input portion.
+    """
+
+    def __init__(
+        self,
+        data_path: str,
+        tokenizer: AutoTokenizer,
+        max_seq_len: int = 4096,
+    ):
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+
+        with open(data_path, "r", encoding="utf-8") as f:
+            self.records = json.load(f)
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, idx):
+        rec = self.records[idx]
+
+        prompt = PROMPT_TEMPLATE.format(
+            context=rec["context"],
+            question=rec["question"],
+        )
+        answer = " " + rec["answer"]
+
+        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+        answer_ids = self.tokenizer.encode(answer, add_special_tokens=False)
+
+        # Add EOS token
+        eos_id = self.tokenizer.eos_token_id
+        if eos_id is not None:
+            answer_ids = answer_ids + [eos_id]
+
+        # Truncate if too long (prioritize keeping the answer)
+        max_prompt_len = self.max_seq_len - len(answer_ids) - 1
+        if max_prompt_len < 10:
+            # Answer too long, truncate answer
+            answer_ids = answer_ids[:self.max_seq_len // 4]
+            max_prompt_len = self.max_seq_len - len(answer_ids) - 1
+        if len(prompt_ids) > max_prompt_len:
+            prompt_ids = prompt_ids[:max_prompt_len]
+
+        input_ids = prompt_ids + answer_ids
+        # Labels: -100 for prompt portion (no loss), actual ids for answer portion
+        labels = [-100] * len(prompt_ids) + answer_ids
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+        }
+
+
+def collate_fn(batch):
+    """Pad sequences and labels to max length in batch."""
+    max_len = max(len(item["input_ids"]) for item in batch)
+    B = len(batch)
+
+    input_ids = torch.zeros(B, max_len, dtype=torch.long)
+    attention_mask = torch.zeros(B, max_len, dtype=torch.long)
+    labels = torch.full((B, max_len), -100, dtype=torch.long)
+
+    for i, item in enumerate(batch):
+        seq_len = len(item["input_ids"])
+        input_ids[i, :seq_len] = torch.tensor(item["input_ids"], dtype=torch.long)
+        attention_mask[i, :seq_len] = 1
+        labels[i, :seq_len] = torch.tensor(item["labels"], dtype=torch.long)
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": labels,
+    }
+
+
+@torch.no_grad()
+def evaluate(model, dataloader, device):
+    """Evaluate loss and PPL on dev set."""
+    model.eval()
+    total_loss = 0.0
+    total_tokens = 0
+
+    for batch in dataloader:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["labels"].to(device)
+
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+        # Count valid tokens (labels != -100)
+        valid_mask = labels != -100
+        n_tokens = valid_mask.sum().item()
+
+        # outputs.loss is already averaged over valid tokens
+        total_loss += outputs.loss.item() * n_tokens
+        total_tokens += n_tokens
+
+    model.train()
+    avg_loss = total_loss / max(total_tokens, 1)
+    ppl = math.exp(min(avg_loss, 20))
+    return avg_loss, ppl
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Stage 2 Upper Bound: LoRA Fine-tune Qwen3")
+    parser.add_argument("--config", type=str, default="config/default.yaml")
+    parser.add_argument("--train_data", type=str, default=None,
+                        help="Path to train JSON. Defaults to config sft_train_data_path")
+    parser.add_argument("--dev_data", type=str, default=None,
+                        help="Path to dev JSON. Defaults to config sft_dev_data_path")
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--grad_accum", type=int, default=8)
+    parser.add_argument("--max_seq_len", type=int, default=4096,
+                        help="Max sequence length (context + question + answer)")
+    parser.add_argument("--lora_rank", type=int, default=32)
+    parser.add_argument("--lora_alpha", type=int, default=64)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--warmup_ratio", type=float, default=0.05)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument("--eval_interval", type=int, default=100)
+    parser.add_argument("--log_interval", type=int, default=20)
+    parser.add_argument("--output_dir", type=str, default="./outputs/benchmark/stage2_finetuned")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        level=logging.INFO,
+    )
+
+    torch.manual_seed(args.seed)
+    config = QCPCConfig.load(args.config)
+
+    train_path = args.train_data or config.sft_train_data_path
+    dev_path = args.dev_data or config.sft_dev_data_path
+    logger.info(f"Train data: {train_path}")
+    logger.info(f"Dev data:   {dev_path}")
+
+    # Load model & tokenizer
+    logger.info(f"Loading Qwen3 from {config.qwen3_model_path}")
+    tokenizer = AutoTokenizer.from_pretrained(config.qwen3_model_path, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        config.qwen3_model_path, trust_remote_code=True, torch_dtype=torch.float32,
+    )
+
+    # Apply LoRA
+    lora_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    )
+    model = get_peft_model(model, lora_config)
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"LoRA trainable params: {trainable_params:,} / {total_params:,} "
+                f"({trainable_params/total_params*100:.2f}%)")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    model = model.to(device)
+    logger.info(f"Device: {device}")
+
+    # Datasets
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    train_dataset = QAFineTuneDataset(train_path, tokenizer, args.max_seq_len)
+    dev_dataset = QAFineTuneDataset(dev_path, tokenizer, args.max_seq_len)
+    logger.info(f"Train samples: {len(train_dataset)}, Dev samples: {len(dev_dataset)}")
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        collate_fn=collate_fn, num_workers=0, drop_last=True,
+    )
+    dev_loader = DataLoader(
+        dev_dataset, batch_size=args.batch_size, shuffle=False,
+        collate_fn=collate_fn, num_workers=0,
+    )
+
+    # Optimizer & scheduler
+    optimizer = AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+
+    total_steps = len(train_loader) * args.epochs // args.grad_accum
+    warmup_steps = int(total_steps * args.warmup_ratio)
+    warmup_scheduler = LinearLR(optimizer, start_factor=0.01, total_iters=max(warmup_steps, 1))
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer, T_max=max(total_steps - warmup_steps, 1), eta_min=args.lr * 0.01,
+    )
+    scheduler = SequentialLR(
+        optimizer, [warmup_scheduler, cosine_scheduler], milestones=[warmup_steps],
+    )
+    logger.info(f"Total steps: {total_steps}, warmup: {warmup_steps}")
+
+    # Output dir
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Training loop
+    model.train()
+    global_step = 0
+    best_eval_loss = float("inf")
+    optimizer.zero_grad()
+
+    for epoch in range(args.epochs):
+        epoch_loss = 0.0
+        num_batches = 0
+
+        for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            loss = outputs.loss / args.grad_accum
+            loss.backward()
+
+            epoch_loss += outputs.loss.item()
+            num_batches += 1
+
+            if (step + 1) % args.grad_accum == 0:
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad],
+                    args.grad_clip,
+                )
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
+
+                if global_step % args.log_interval == 0:
+                    avg_loss = epoch_loss / num_batches
+                    train_ppl = math.exp(min(avg_loss, 20))
+                    lr = optimizer.param_groups[0]["lr"]
+                    logger.info(
+                        f"Epoch {epoch+1} Step {global_step}/{total_steps} | "
+                        f"loss={outputs.loss.item():.4f} avg={avg_loss:.4f} ppl={train_ppl:.2f} lr={lr:.2e}"
+                    )
+
+                if global_step % args.eval_interval == 0:
+                    eval_loss, eval_ppl = evaluate(model, dev_loader, device)
+                    logger.info(f"  [Eval] Step {global_step} | loss={eval_loss:.4f} ppl={eval_ppl:.2f}")
+                    if eval_loss < best_eval_loss:
+                        best_eval_loss = eval_loss
+                        model.save_pretrained(output_dir / "best_lora")
+                        tokenizer.save_pretrained(output_dir / "best_lora")
+                        logger.info(f"  Saved best model (loss={eval_loss:.4f})")
+
+        # End of epoch eval
+        eval_loss, eval_ppl = evaluate(model, dev_loader, device)
+        logger.info(f"Epoch {epoch+1} done | eval_loss={eval_loss:.4f} eval_ppl={eval_ppl:.2f}")
+        if eval_loss < best_eval_loss:
+            best_eval_loss = eval_loss
+            model.save_pretrained(output_dir / "best_lora")
+            tokenizer.save_pretrained(output_dir / "best_lora")
+
+    # Save final
+    model.save_pretrained(output_dir / "final_lora")
+    tokenizer.save_pretrained(output_dir / "final_lora")
+
+    # Save training info
+    info = {
+        "benchmark": "stage2_finetune",
+        "model": config.qwen3_model_path,
+        "lora_rank": args.lora_rank,
+        "lora_alpha": args.lora_alpha,
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "batch_size": args.batch_size,
+        "grad_accum": args.grad_accum,
+        "trainable_params": trainable_params,
+        "total_params": total_params,
+        "best_eval_loss": best_eval_loss,
+        "best_eval_ppl": math.exp(min(best_eval_loss, 20)),
+        "train_samples": len(train_dataset),
+        "dev_samples": len(dev_dataset),
+    }
+    with open(output_dir / "training_info.json", "w") as f:
+        json.dump(info, f, indent=2)
+
+    print("\n" + "=" * 60)
+    print("Stage 2 Fine-tuning Complete")
+    print("=" * 60)
+    print(f"  Best eval loss: {best_eval_loss:.4f}")
+    print(f"  Best eval PPL:  {math.exp(min(best_eval_loss, 20)):.2f}")
+    print(f"  LoRA adapter:   {output_dir / 'best_lora'}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

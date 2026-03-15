@@ -146,6 +146,7 @@ def create_pretrain_dataloader(
     num_workers: int = 4,
     shuffle: bool = True,
     max_samples: int | None = None,
+    drop_last: bool = True,
 ) -> DataLoader:
     dataset = PretrainDataset(data_path, tokenizer, max_context_len, max_cont_len)
     if max_samples is not None and len(dataset) > max_samples:
@@ -157,7 +158,7 @@ def create_pretrain_dataloader(
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
-        drop_last=True,
+        drop_last=drop_last,
     )
 
 
@@ -171,6 +172,7 @@ def create_qa_dataloader(
     num_workers: int = 4,
     shuffle: bool = True,
     max_samples: int | None = None,
+    drop_last: bool = True,
 ) -> DataLoader:
     dataset = QADataset(data_path, tokenizer, max_context_len, max_prompt_len, max_answer_len)
     if max_samples is not None and len(dataset) > max_samples:
@@ -182,5 +184,5 @@ def create_qa_dataloader(
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
-        drop_last=True,
+        drop_last=drop_last,
     )

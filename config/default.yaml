@@ -57,6 +57,7 @@ fsdp_sharding_strategy: FULL_SHARD
 pretrain_data_path: ./data/pretrain/fineweb_sampled.jsonl
 sft_train_data_path: ./data/processed/sft/train.json
 sft_dev_data_path: ./data/processed/sft/dev.json
+sft_eval_data_path: ./data/processed/sft/eval.json
 
 # --- Logging ---
 log_interval: 50

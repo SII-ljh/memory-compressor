@@ -71,6 +71,7 @@ class QCPCConfig:
     pretrain_data_path: str = "./data/pretrain/fineweb_sampled.jsonl"
     sft_train_data_path: str = "./data/processed/sft/train.json"
     sft_dev_data_path: str = "./data/processed/sft/dev.json"
+    sft_eval_data_path: str = "./data/processed/sft/eval.json"
 
     # --- Logging ---
     log_interval: int = 50
