@@ -6,7 +6,7 @@ the full context directly to the Qwen3 model (no Perceiver compression).
 This establishes the ceiling for QCPC Stage 1:
   QCPC_loss >= upper_bound_loss  (more compression → higher loss)
 
-Input: pretrain eval split (data/processed/pretrain/eval.jsonl).
+Input: pretrain eval split (data/stage1/eval.jsonl).
 Method: Feed [context + continuation] as one sequence to Qwen3, compute NTP loss
         on the continuation tokens only (same target region as QCPC).
 

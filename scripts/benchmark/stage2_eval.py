@@ -6,7 +6,7 @@ Evaluates the LoRA-finetuned Qwen3 model on the dedicated SFT eval split:
 
 QCPC Stage 2 performance should fall between these two bounds.
 
-Uses: config.sft_eval_data_path (data/processed/sft/eval.json)
+Uses: config.sft_eval_data_path (data/stage2/eval.json)
 Format: [{"context": str, "question": str, "answer": str, "source": str}]
 
 Metrics: Loss, PPL, F1, EM, ROUGE-L

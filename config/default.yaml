@@ -54,10 +54,10 @@ use_fsdp: true
 fsdp_sharding_strategy: FULL_SHARD
 
 # --- Data ---
-pretrain_data_path: ./data/processed/pretrain/train.jsonl
-pretrain_eval_data_path: ./data/processed/pretrain/eval.jsonl
-sft_train_data_path: ./data/processed/sft/train.json
-sft_eval_data_path: ./data/processed/sft/eval.json
+pretrain_data_path: ./data/stage1/train.jsonl
+pretrain_eval_data_path: ./data/stage1/eval.jsonl
+sft_train_data_path: ./data/stage2/train.json
+sft_eval_data_path: ./data/stage2/eval.json
 
 # --- Logging ---
 log_interval: 50

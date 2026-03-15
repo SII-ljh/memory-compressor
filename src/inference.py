@@ -9,11 +9,11 @@ Usage:
 
     # Multi-GPU inference
     accelerate launch src/inference.py --config config/default.yaml --checkpoint outputs/stage2/best.pt \
-        --input_file data/eval/test.json --output_file outputs/predictions.json
+        --input_file data/stage2/eval.json --output_file outputs/predictions.json
 
     # Batch inference from file
     python src/inference.py --config config/default.yaml --checkpoint outputs/stage2/best.pt \
-        --input_file data/processed/sft/dev.json --output_file outputs/predictions.json
+        --input_file data/stage2/eval.json --output_file outputs/predictions.json
 """
 
 import argparse

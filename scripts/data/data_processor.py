@@ -2,19 +2,19 @@
 """
 data_processor.py — 将 data_downloader.py 下载的原始 HF 数据集转换为统一格式
 
+输入: data/download/ (data_downloader.py 的输出)
+
 输出结构:
-  data/processed/
-    pretrain/
-      train.jsonl     # 预训练训练集 (去掉末尾 eval 部分)
-      eval.jsonl      # 预训练验证集 (末尾 500 条, 也用于 Stage 1 上界评估)
-    sft/
-      train.json      # SFT 训练集
-      dev.json        # SFT 验证集 (训练期间 eval step 使用)
-      eval.json       # SFT 评估集 (独立, 用于 Stage 2 上下界评估)
-    eval/
+  data/
+    stage1/             # Stage 1 预训练数据
+      train.jsonl       # 预训练训练集 (去掉末尾 eval 部分)
+      eval.jsonl        # 预训练验证集 (末尾 500 条, 也用于 Stage 1 上界评估)
+    stage2/             # Stage 2 QA 微调数据
+      train.json        # SFT 训练集
+      eval.json         # SFT 评估集 (独立, 用于 Stage 2 上下界评估)
+    benchmark/          # 发论文需要跑的 benchmark
       longbench/{cfg}.json
       ruler/{cfg}.json
-    diagnostic/
       halueval.json
       truthfulqa.json
 
@@ -23,7 +23,7 @@ data_processor.py — 将 data_downloader.py 下载的原始 HF 数据集转换�
     python scripts/data/data_processor.py --task pretrain
     python scripts/data/data_processor.py --task sft
     python scripts/data/data_processor.py --task eval diagnostic
-    python scripts/data/data_processor.py --input_dir ./data --output_dir ./data/processed
+    python scripts/data/data_processor.py --input_dir ./data/download --output_dir ./data
     python scripts/data/data_processor.py --force
 """
 
@@ -422,12 +422,12 @@ def process_pretrain(input_dir: Path, output_dir: Path, force: bool = False,
       - Stage 1 训练期间的 eval step
       - Stage 1 上界评估 (Qwen3 直接 NTP)
     """
-    pretrain_out = ensure_dir(output_dir / "pretrain")
-    train_path = pretrain_out / "train.jsonl"
-    eval_path = pretrain_out / "eval.jsonl"
+    stage1_out = ensure_dir(output_dir / "stage1")
+    train_path = stage1_out / "train.jsonl"
+    eval_path = stage1_out / "eval.jsonl"
 
     if not force and train_path.exists() and eval_path.exists():
-        print(f"  [Skip] Pretrain 已存在 (使用 --force 覆盖)")
+        print(f"  [Skip] Stage 1 数据已存在 (使用 --force 覆盖)")
         return
 
     src = input_dir / "pretrain" / "fineweb_sampled.jsonl"
@@ -457,18 +457,18 @@ def process_pretrain(input_dir: Path, output_dir: Path, force: bool = False,
     with open(eval_path, "w", encoding="utf-8") as f:
         f.writelines(eval_lines)
 
-    print(f"  [Pretrain Done] train: {len(train_lines)} samples → {train_path}")
-    print(f"                  eval:  {len(eval_lines)} samples → {eval_path}")
+    print(f"  [Stage 1 Done] train: {len(train_lines)} samples → {train_path}")
+    print(f"                 eval:  {len(eval_lines)} samples → {eval_path}")
 
 
 def process_sft(input_dir: Path, output_dir: Path, force: bool = False, seed: int = 42):
-    """处理 SFT 数据: 合并所有 QA 数据为 train.json + dev.json + eval.json."""
-    sft_out = ensure_dir(output_dir / "sft")
-    train_path = sft_out / "train.json"
-    eval_path = sft_out / "eval.json"
+    """处理 SFT 数据: 合并所有 QA 数据为 train.json + eval.json."""
+    stage2_out = ensure_dir(output_dir / "stage2")
+    train_path = stage2_out / "train.json"
+    eval_path = stage2_out / "eval.json"
 
     if not force and train_path.exists() and eval_path.exists():
-        print(f"  [Skip] SFT 已存在 (使用 --force 覆盖)")
+        print(f"  [Skip] Stage 2 数据已存在 (使用 --force 覆盖)")
         return
 
     sft_dir = input_dir / "sft"
@@ -569,8 +569,8 @@ def process_sft(input_dir: Path, output_dir: Path, force: bool = False, seed: in
     write_json(train_samples, train_path)
     write_json(eval_samples, eval_path)
 
-    print(f"\n  [SFT Done] train: {len(train_samples)} samples → {train_path}")
-    print(f"             eval:  {len(eval_samples)} samples → {eval_path}")
+    print(f"\n  [Stage 2 Done] train: {len(train_samples)} samples → {train_path}")
+    print(f"                 eval:  {len(eval_samples)} samples → {eval_path}")
 
     # 来源分布
     train_sources = Counter(s["source"] for s in train_samples)
@@ -587,11 +587,11 @@ def process_eval(input_dir: Path, output_dir: Path, force: bool = False):
         print(f"          请先运行: python scripts/data/data_downloader.py --task eval")
         return
 
-    print(f"\n  [Eval] 处理评测数据集")
+    print(f"\n  [Benchmark/Eval] 处理评测数据集")
 
     # --- LongBench ---
     lb_in = eval_in / "longbench"
-    lb_out = ensure_dir(output_dir / "eval" / "longbench")
+    lb_out = ensure_dir(output_dir / "benchmark" / "longbench")
     for cfg in LONGBENCH_QA_CONFIGS:
         out_path = lb_out / f"{cfg}.json"
         if not force and out_path.exists():
@@ -605,7 +605,7 @@ def process_eval(input_dir: Path, output_dir: Path, force: bool = False):
 
     # --- RULER ---
     ruler_in = eval_in / "ruler"
-    ruler_out = ensure_dir(output_dir / "eval" / "ruler")
+    ruler_out = ensure_dir(output_dir / "benchmark" / "ruler")
     for cfg in RULER_CONFIGS:
         out_path = ruler_out / f"{cfg}.json"
         if not force and out_path.exists():
@@ -617,23 +617,23 @@ def process_eval(input_dir: Path, output_dir: Path, force: bool = False):
         write_json(converted, out_path)
         print(f"    ruler/{cfg}: {len(converted)} samples")
 
-    print(f"  [Eval Done]")
+    print(f"  [Benchmark/Eval Done]")
 
 
 def process_diagnostic(input_dir: Path, output_dir: Path, force: bool = False):
-    """处理诊断数据: HaluEval + TruthfulQA (不做清洗)."""
+    """处理诊断数据: HaluEval + TruthfulQA (不做清洗). 输出到 benchmark/ 目录."""
     diag_in = input_dir / "diagnostic"
     if not diag_in.exists():
         print(f"  [Error] Diagnostic 原始数据目录不存在: {diag_in}")
         print(f"          请先运行: python scripts/data/data_downloader.py --task diagnostic")
         return
 
-    diag_out = ensure_dir(output_dir / "diagnostic")
+    bench_out = ensure_dir(output_dir / "benchmark")
 
-    print(f"\n  [Diagnostic] 处理诊断数据集")
+    print(f"\n  [Benchmark/Diagnostic] 处理诊断数据集")
 
     # --- HaluEval ---
-    out_path = diag_out / "halueval.json"
+    out_path = bench_out / "halueval.json"
     if force or not out_path.exists():
         records = read_jsonl(diag_in / "halueval.jsonl")
         if records:
@@ -642,7 +642,7 @@ def process_diagnostic(input_dir: Path, output_dir: Path, force: bool = False):
             print(f"    halueval: {len(converted)} samples")
 
     # --- TruthfulQA ---
-    out_path = diag_out / "truthfulqa.json"
+    out_path = bench_out / "truthfulqa.json"
     if force or not out_path.exists():
         records = read_jsonl(diag_in / "truthfulqa.jsonl")
         if records:
@@ -650,7 +650,7 @@ def process_diagnostic(input_dir: Path, output_dir: Path, force: bool = False):
             write_json(converted, out_path)
             print(f"    truthfulqa: {len(converted)} samples")
 
-    print(f"  [Diagnostic Done]")
+    print(f"  [Benchmark/Diagnostic Done]")
 
 
 # ===========================================================================
@@ -674,7 +674,7 @@ def main():
   python scripts/data/data_processor.py --task all
   python scripts/data/data_processor.py --task sft
   python scripts/data/data_processor.py --task eval diagnostic
-  python scripts/data/data_processor.py --input_dir ./data --output_dir ./data/processed
+  python scripts/data/data_processor.py --input_dir ./data/download --output_dir ./data
   python scripts/data/data_processor.py --force
         """,
     )
@@ -688,14 +688,14 @@ def main():
     parser.add_argument(
         "--input_dir",
         type=str,
-        default="./data",
-        help="原始数据根目录 (默认: ./data)",
+        default="./data/download",
+        help="原始数据根目录 (默认: ./data/download)",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./data/processed",
-        help="输出根目录 (默认: ./data/processed)",
+        default="./data",
+        help="输出根目录 (默认: ./data, 会在下面生成 stage1/ stage2/ benchmark/)",
     )
     parser.add_argument(
         "--force",

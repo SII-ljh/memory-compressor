@@ -26,8 +26,8 @@ data_downloader.py — 科研数据集全量/采样下载器
     # Debug 模式 (从全量数据集随机采样 5%, 用于本地调试模型架构和训练)
     python scripts/data/data_downloader.py --task all --debug
 
-    # 自定义输出目录
-    python scripts/data/data_downloader.py --task all --output_dir /path/to/data
+    # 自定义输出目录 (默认: ./data/download)
+    python scripts/data/data_downloader.py --task all --output_dir /path/to/download
 """
 
 import argparse
@@ -550,8 +550,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例 (从项目根目录运行):
-  python scripts/data/data_downloader.py --task all                   # 下载全部
-  python scripts/data/data_downloader.py --task pretrain --no-mirror    # 禁用镜像, 直连 HF
+  python scripts/data/data_downloader.py --task all                    # 下载全部 → data/download/
+  python scripts/data/data_downloader.py --task pretrain --no-mirror   # 禁用镜像, 直连 HF
   python scripts/data/data_downloader.py --task sft eval               # 仅下载 SFT + Eval
   python scripts/data/data_downloader.py --task sft eval --debug       # Debug 模式小数据集
   python scripts/data/data_downloader.py --task pretrain --target_tokens 500_000_000  # 采样 0.5B tokens
@@ -567,8 +567,8 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./data",
-        help="输出根目录 (默认: ./data)",
+        default="./data/download",
+        help="输出根目录 (默认: ./data/download)",
     )
     parser.add_argument(
         "--mirror",
