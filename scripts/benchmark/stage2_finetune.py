@@ -1,22 +1,17 @@
 """Stage 2 Upper Bound: LoRA fine-tune Qwen3 on SFT QA data.
 
 Fine-tunes Qwen3 with full context + question → answer using LoRA.
-This establishes the ceiling for QCPC Stage 2:
-  - The fine-tuned model sees the entire context without compression.
-  - QCPC compresses context into M memory tokens, so its QA performance
-    should be <= this upper bound.
+This establishes the ceiling for QCPC Stage 2.
 
-Input format (from prepare_eval_data.py):
-    [{"context": str, "question": str, "answer": str}, ...]
+Uses data from data_processor.py:
+  - Train: config.sft_train_data_path
+  - Eval:  config.sft_eval_data_path
 
-Training format fed to the model:
-    Input:  "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
-    Target: " {answer}"
+Format: [{"context": str, "question": str, "answer": str, "source": str}]
 
 Usage:
     python scripts/benchmark/stage2_finetune.py --config config/default.yaml
     python scripts/benchmark/stage2_finetune.py --config config/default.yaml --epochs 3 --lr 2e-4
-    python scripts/benchmark/stage2_finetune.py --config config/default.yaml --lora_rank 16
 
 Requires: pip install peft
 """
@@ -168,10 +163,6 @@ def evaluate(model, dataloader, device):
 def main():
     parser = argparse.ArgumentParser(description="Stage 2 Upper Bound: LoRA Fine-tune Qwen3")
     parser.add_argument("--config", type=str, default="config/default.yaml")
-    parser.add_argument("--train_data", type=str, default=None,
-                        help="Path to train JSON. Defaults to config sft_train_data_path")
-    parser.add_argument("--dev_data", type=str, default=None,
-                        help="Path to dev JSON. Defaults to config sft_dev_data_path")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--batch_size", type=int, default=4)
@@ -198,8 +189,8 @@ def main():
     torch.manual_seed(args.seed)
     config = QCPCConfig.load(args.config)
 
-    train_path = args.train_data or config.sft_train_data_path
-    dev_path = args.dev_data or config.sft_dev_data_path
+    train_path = config.sft_train_data_path
+    dev_path = config.sft_eval_data_path
     logger.info(f"Train data: {train_path}")
     logger.info(f"Dev data:   {dev_path}")
 

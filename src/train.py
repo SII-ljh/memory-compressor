@@ -259,9 +259,9 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
         num_workers=config.num_workers,
     )
 
-    # Eval loader: last eval_samples from pretrain data, no shuffle
+    # Eval loader: dedicated pretrain eval split
     eval_loader = create_pretrain_dataloader(
-        data_path=config.pretrain_data_path,
+        data_path=config.pretrain_eval_data_path,
         tokenizer=tokenizer,
         batch_size=per_gpu_bs,
         max_context_len=config.stage1_max_context_len,
@@ -475,9 +475,9 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         num_workers=config.num_workers,
     )
 
-    # Eval loader: dev set, capped at eval_samples
+    # Eval loader: dedicated SFT eval split
     eval_loader = create_qa_dataloader(
-        data_path=config.sft_dev_data_path,
+        data_path=config.sft_eval_data_path,
         tokenizer=tokenizer,
         batch_size=per_gpu_bs,
         max_context_len=config.stage2_max_context_len,

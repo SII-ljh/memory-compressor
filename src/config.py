@@ -68,9 +68,9 @@ class QCPCConfig:
     fsdp_sharding_strategy: str = "FULL_SHARD"
 
     # --- Data ---
-    pretrain_data_path: str = "./data/pretrain/fineweb_sampled.jsonl"
+    pretrain_data_path: str = "./data/processed/pretrain/train.jsonl"
+    pretrain_eval_data_path: str = "./data/processed/pretrain/eval.jsonl"
     sft_train_data_path: str = "./data/processed/sft/train.json"
-    sft_dev_data_path: str = "./data/processed/sft/dev.json"
     sft_eval_data_path: str = "./data/processed/sft/eval.json"
 
     # --- Logging ---
