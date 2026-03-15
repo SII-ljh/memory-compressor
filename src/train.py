@@ -121,6 +121,8 @@ def _resolve_batch_params(
 
     # Broadcast from rank 0
     if world_size > 1:
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend="nccl")
         torch.distributed.broadcast(bs_tensor, src=0)
 
     per_gpu_bs = bs_tensor.item()
