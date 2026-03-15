@@ -1,8 +1,8 @@
 # Model weights
 models/
 
-# Data
-data/
+# Data (only the top-level data/ directory, not scripts/data/)
+/data/
 
 # Training outputs
 outputs/
