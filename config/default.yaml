@@ -1,0 +1,75 @@
+# QCPC Default Configuration
+# Two key switches control 4 operating modes:
+#   use_decoupled_rope=false, use_prompt_bias=false  → Baseline
+#   use_decoupled_rope=false, use_prompt_bias=true   → Perceiver IO + Prompt Bias
+#   use_decoupled_rope=true,  use_prompt_bias=false  → Decoupled RoPE
+#   use_decoupled_rope=true,  use_prompt_bias=true   → Full Model
+
+# --- Mode switches ---
+use_decoupled_rope: true
+use_prompt_bias: true
+
+# --- Model dimensions (aligned with Qwen3-0.6B) ---
+hidden_dim: 1024
+num_heads: 16
+head_dim: 64
+rope_dim: 64
+num_memory_tokens: 128
+num_process_layers: 6
+query_mapper_mid_dim: 512
+max_position_embeddings: 32768
+rope_theta: 1000000.0
+ffn_intermediate_dim: 2048
+init_scale: 0.02
+
+# --- Qwen3 backbone ---
+qwen3_model_path: ./models/Qwen3-0.6B
+vocab_size: 151936
+
+# --- Training: Stage 1 (pretrain) ---
+stage1_lr: 1.0e-4
+stage1_batch_size: 8
+stage1_max_epochs: 3
+stage1_max_context_len: 4096
+stage1_max_cont_len: 256
+stage1_warmup_ratio: 0.05
+stage1_weight_decay: 0.01
+stage1_grad_clip: 1.0
+stage1_gradient_accumulation_steps: 4
+
+# --- Training: Stage 2 (QA finetune) ---
+stage2_lr: 5.0e-5
+stage2_batch_size: 4
+stage2_max_epochs: 5
+stage2_max_context_len: 4096
+stage2_max_prompt_len: 128
+stage2_max_answer_len: 256
+stage2_warmup_ratio: 0.05
+stage2_weight_decay: 0.01
+stage2_grad_clip: 1.0
+stage2_gradient_accumulation_steps: 4
+
+# --- Distributed ---
+use_fsdp: true
+fsdp_sharding_strategy: FULL_SHARD
+
+# --- Data ---
+pretrain_data_path: ./data/pretrain/fineweb_sampled.jsonl
+sft_train_data_path: ./data/processed/sft/train.json
+sft_dev_data_path: ./data/processed/sft/dev.json
+
+# --- Logging ---
+log_interval: 50
+eval_interval: 500
+save_interval: 1000
+output_dir: ./outputs
+
+# --- Auto batch size ---
+auto_batch_size: true
+target_effective_batch_size: 256
+auto_batch_safety_margin: 0.85
+auto_batch_upper_bound: 128
+
+# --- Misc ---
+seed: 42
+num_workers: 4
