@@ -38,6 +38,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
+import wandb
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 
@@ -137,6 +138,50 @@ def _resolve_batch_params(
     return per_gpu_bs, accum_steps
 
 
+@torch.no_grad()
+def evaluate_stage1(model, eval_loader, accelerator):
+    """Run evaluation for Stage 1 (text completion). Returns eval loss and PPL."""
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+    for batch in eval_loader:
+        result = model(
+            context_ids=batch["context_ids"],
+            context_mask=batch["context_mask"],
+            target_ids=batch["target_ids"],
+            target_mask=batch["target_mask"],
+        )
+        total_loss += result["loss"].item()
+        num_batches += 1
+    model.train()
+    avg_loss = total_loss / max(num_batches, 1)
+    ppl = math.exp(min(avg_loss, 20))  # clamp to avoid overflow
+    return avg_loss, ppl
+
+
+@torch.no_grad()
+def evaluate_stage2(model, eval_loader, accelerator):
+    """Run evaluation for Stage 2 (QA). Returns eval loss and PPL."""
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+    for batch in eval_loader:
+        result = model(
+            context_ids=batch["context_ids"],
+            context_mask=batch["context_mask"],
+            prompt_ids=batch["prompt_ids"],
+            prompt_mask=batch["prompt_mask"],
+            target_ids=batch["target_ids"],
+            target_mask=batch["target_mask"],
+        )
+        total_loss += result["loss"].item()
+        num_batches += 1
+    model.train()
+    avg_loss = total_loss / max(num_batches, 1)
+    ppl = math.exp(min(avg_loss, 20))  # clamp to avoid overflow
+    return avg_loss, ppl
+
+
 def train_stage1(config: QCPCConfig, resume_path: str | None = None):
     """Stage 1: Text completion pretraining."""
     logger.info("=== Stage 1: Text Completion Pretraining ===")
@@ -163,6 +208,29 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
         mixed_precision="no",
     )
 
+    # Init wandb (offline mode, main process only)
+    if accelerator.is_main_process:
+        os.environ["WANDB_MODE"] = "offline"
+        wandb.init(
+            project=config.wandb_project,
+            name=f"stage1_rope{config.use_decoupled_rope}",
+            config={
+                "stage": 1,
+                "use_decoupled_rope": config.use_decoupled_rope,
+                "use_prompt_bias": False,
+                "hidden_dim": config.hidden_dim,
+                "num_memory_tokens": config.num_memory_tokens,
+                "num_process_layers": config.num_process_layers,
+                "lr": config.stage1_lr,
+                "batch_size": per_gpu_bs,
+                "accum_steps": accum_steps,
+                "max_epochs": config.stage1_max_epochs,
+                "max_context_len": config.stage1_max_context_len,
+                "max_cont_len": config.stage1_max_cont_len,
+                "total_trainable": counts["total_trainable"],
+            },
+        )
+
     if accelerator.is_main_process:
         logger.info(f"Config: {config}")
         logger.info(f"Devices: {accelerator.num_processes}")
@@ -176,7 +244,7 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
         weight_decay=config.stage1_weight_decay,
     )
 
-    # Data loader
+    # Data loaders
     tokenizer = model.decoder.tokenizer
     train_loader = create_pretrain_dataloader(
         data_path=config.pretrain_data_path,
@@ -187,6 +255,18 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
         num_workers=config.num_workers,
     )
 
+    # Eval loader: last eval_samples from pretrain data, no shuffle
+    eval_loader = create_pretrain_dataloader(
+        data_path=config.pretrain_data_path,
+        tokenizer=tokenizer,
+        batch_size=per_gpu_bs,
+        max_context_len=config.stage1_max_context_len,
+        max_cont_len=config.stage1_max_cont_len,
+        num_workers=config.num_workers,
+        shuffle=False,
+        max_samples=config.eval_samples,
+    )
+
     # LR scheduler
     total_steps = len(train_loader) * config.stage1_max_epochs // accum_steps
     warmup_steps = int(total_steps * config.stage1_warmup_ratio)
@@ -194,10 +274,14 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
     cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=config.stage1_lr * 0.01)
     scheduler = SequentialLR(optimizer, [warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
+    if accelerator.is_main_process:
+        logger.info(f"Total training steps: {total_steps}, warmup: {warmup_steps}")
+
     # Prepare with accelerator
     model, optimizer, train_loader, scheduler = accelerator.prepare(
         model, optimizer, train_loader, scheduler
     )
+    eval_loader = accelerator.prepare(eval_loader)
 
     # Resume checkpoint (perceiver-only state dict)
     start_epoch = 0
@@ -217,7 +301,7 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
 
     # Training loop
     model.train()
-    best_loss = float("inf")
+    best_eval_loss = float("inf")
 
     for epoch in range(start_epoch, config.stage1_max_epochs):
         epoch_loss = 0.0
@@ -247,11 +331,38 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
 
             if global_step % config.log_interval == 0 and accelerator.is_main_process:
                 avg_loss = epoch_loss / num_batches
+                train_ppl = math.exp(min(avg_loss, 20))
                 lr = optimizer.param_groups[0]["lr"]
                 logger.info(
-                    f"Epoch {epoch+1} Step {global_step} | "
-                    f"loss={loss.item():.4f} avg_loss={avg_loss:.4f} lr={lr:.2e}"
+                    f"Epoch {epoch+1} Step {global_step}/{total_steps} | "
+                    f"loss={loss.item():.4f} avg_loss={avg_loss:.4f} ppl={train_ppl:.2f} lr={lr:.2e}"
                 )
+                wandb.log({
+                    "train/loss": loss.item(),
+                    "train/avg_loss": avg_loss,
+                    "train/ppl": train_ppl,
+                    "train/lr": lr,
+                    "train/epoch": epoch + 1,
+                }, step=global_step)
+
+            # Eval
+            if global_step % config.eval_interval == 0 and accelerator.is_main_process:
+                eval_loss, eval_ppl = evaluate_stage1(model, eval_loader, accelerator)
+                logger.info(
+                    f"  [Eval] Step {global_step}/{total_steps} | "
+                    f"eval_loss={eval_loss:.4f} eval_ppl={eval_ppl:.2f}"
+                )
+                wandb.log({
+                    "eval/loss": eval_loss,
+                    "eval/ppl": eval_ppl,
+                }, step=global_step)
+
+                if eval_loss < best_eval_loss:
+                    best_eval_loss = eval_loss
+                    _save_checkpoint(
+                        accelerator, model, optimizer, epoch, global_step,
+                        output_dir / "best.pt"
+                    )
 
             if global_step % config.save_interval == 0 and accelerator.is_main_process:
                 _save_checkpoint(
@@ -261,15 +372,11 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
 
         # End of epoch
         avg_epoch_loss = epoch_loss / max(num_batches, 1)
+        epoch_ppl = math.exp(min(avg_epoch_loss, 20))
         if accelerator.is_main_process:
-            logger.info(f"Epoch {epoch+1} done | avg_loss={avg_epoch_loss:.4f}")
-
-            if avg_epoch_loss < best_loss:
-                best_loss = avg_epoch_loss
-                _save_checkpoint(
-                    accelerator, model, optimizer, epoch, global_step,
-                    output_dir / "best.pt"
-                )
+            logger.info(
+                f"Epoch {epoch+1} done | avg_loss={avg_epoch_loss:.4f} ppl={epoch_ppl:.2f}"
+            )
 
     # Save final
     if accelerator.is_main_process:
@@ -277,6 +384,7 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
             accelerator, model, optimizer, config.stage1_max_epochs, global_step,
             output_dir / "final.pt"
         )
+        wandb.finish()
     logger.info("Stage 1 training complete.")
 
 
@@ -313,6 +421,30 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         mixed_precision="no",
     )
 
+    # Init wandb (offline mode, main process only)
+    if accelerator.is_main_process:
+        os.environ["WANDB_MODE"] = "offline"
+        wandb.init(
+            project=config.wandb_project,
+            name=f"stage2_rope{config.use_decoupled_rope}_bias{config.use_prompt_bias}",
+            config={
+                "stage": 2,
+                "use_decoupled_rope": config.use_decoupled_rope,
+                "use_prompt_bias": True,
+                "hidden_dim": config.hidden_dim,
+                "num_memory_tokens": config.num_memory_tokens,
+                "num_process_layers": config.num_process_layers,
+                "lr": config.stage2_lr,
+                "batch_size": per_gpu_bs,
+                "accum_steps": accum_steps,
+                "max_epochs": config.stage2_max_epochs,
+                "max_context_len": config.stage2_max_context_len,
+                "max_prompt_len": config.stage2_max_prompt_len,
+                "max_answer_len": config.stage2_max_answer_len,
+                "total_trainable": counts["total_trainable"],
+            },
+        )
+
     if accelerator.is_main_process:
         logger.info(f"Config: {config}")
         logger.info(f"Devices: {accelerator.num_processes}")
@@ -326,7 +458,7 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         weight_decay=config.stage2_weight_decay,
     )
 
-    # Data loader
+    # Data loaders
     tokenizer = model.decoder.tokenizer
     train_loader = create_qa_dataloader(
         data_path=config.sft_train_data_path,
@@ -338,6 +470,19 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         num_workers=config.num_workers,
     )
 
+    # Eval loader: dev set, capped at eval_samples
+    eval_loader = create_qa_dataloader(
+        data_path=config.sft_dev_data_path,
+        tokenizer=tokenizer,
+        batch_size=per_gpu_bs,
+        max_context_len=config.stage2_max_context_len,
+        max_prompt_len=config.stage2_max_prompt_len,
+        max_answer_len=config.stage2_max_answer_len,
+        num_workers=config.num_workers,
+        shuffle=False,
+        max_samples=config.eval_samples,
+    )
+
     # LR scheduler
     total_steps = len(train_loader) * config.stage2_max_epochs // accum_steps
     warmup_steps = int(total_steps * config.stage2_warmup_ratio)
@@ -345,10 +490,14 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
     cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=config.stage2_lr * 0.01)
     scheduler = SequentialLR(optimizer, [warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
+    if accelerator.is_main_process:
+        logger.info(f"Total training steps: {total_steps}, warmup: {warmup_steps}")
+
     # Prepare
     model, optimizer, train_loader, scheduler = accelerator.prepare(
         model, optimizer, train_loader, scheduler
     )
+    eval_loader = accelerator.prepare(eval_loader)
 
     # Output dir
     output_dir = Path(config.output_dir) / "stage2"
@@ -356,7 +505,7 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
 
     # Training loop
     model.train()
-    best_loss = float("inf")
+    best_eval_loss = float("inf")
     global_step = 0
 
     for epoch in range(config.stage2_max_epochs):
@@ -389,11 +538,38 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
 
             if global_step % config.log_interval == 0 and accelerator.is_main_process:
                 avg_loss = epoch_loss / num_batches
+                train_ppl = math.exp(min(avg_loss, 20))
                 lr = optimizer.param_groups[0]["lr"]
                 logger.info(
-                    f"Epoch {epoch+1} Step {global_step} | "
-                    f"loss={loss.item():.4f} avg_loss={avg_loss:.4f} lr={lr:.2e}"
+                    f"Epoch {epoch+1} Step {global_step}/{total_steps} | "
+                    f"loss={loss.item():.4f} avg_loss={avg_loss:.4f} ppl={train_ppl:.2f} lr={lr:.2e}"
                 )
+                wandb.log({
+                    "train/loss": loss.item(),
+                    "train/avg_loss": avg_loss,
+                    "train/ppl": train_ppl,
+                    "train/lr": lr,
+                    "train/epoch": epoch + 1,
+                }, step=global_step)
+
+            # Eval
+            if global_step % config.eval_interval == 0 and accelerator.is_main_process:
+                eval_loss, eval_ppl = evaluate_stage2(model, eval_loader, accelerator)
+                logger.info(
+                    f"  [Eval] Step {global_step}/{total_steps} | "
+                    f"eval_loss={eval_loss:.4f} eval_ppl={eval_ppl:.2f}"
+                )
+                wandb.log({
+                    "eval/loss": eval_loss,
+                    "eval/ppl": eval_ppl,
+                }, step=global_step)
+
+                if eval_loss < best_eval_loss:
+                    best_eval_loss = eval_loss
+                    _save_checkpoint(
+                        accelerator, model, optimizer, epoch, global_step,
+                        output_dir / "best.pt"
+                    )
 
             if global_step % config.save_interval == 0 and accelerator.is_main_process:
                 _save_checkpoint(
@@ -402,21 +578,18 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
                 )
 
         avg_epoch_loss = epoch_loss / max(num_batches, 1)
+        epoch_ppl = math.exp(min(avg_epoch_loss, 20))
         if accelerator.is_main_process:
-            logger.info(f"Epoch {epoch+1} done | avg_loss={avg_epoch_loss:.4f}")
-
-            if avg_epoch_loss < best_loss:
-                best_loss = avg_epoch_loss
-                _save_checkpoint(
-                    accelerator, model, optimizer, epoch, global_step,
-                    output_dir / "best.pt"
-                )
+            logger.info(
+                f"Epoch {epoch+1} done | avg_loss={avg_epoch_loss:.4f} ppl={epoch_ppl:.2f}"
+            )
 
     if accelerator.is_main_process:
         _save_checkpoint(
             accelerator, model, optimizer, config.stage2_max_epochs, global_step,
             output_dir / "final.pt"
         )
+        wandb.finish()
     logger.info("Stage 2 training complete.")
 
 

@@ -145,8 +145,11 @@ def create_pretrain_dataloader(
     max_cont_len: int = 256,
     num_workers: int = 4,
     shuffle: bool = True,
+    max_samples: int | None = None,
 ) -> DataLoader:
     dataset = PretrainDataset(data_path, tokenizer, max_context_len, max_cont_len)
+    if max_samples is not None and len(dataset) > max_samples:
+        dataset = torch.utils.data.Subset(dataset, range(len(dataset) - max_samples, len(dataset)))
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -167,8 +170,11 @@ def create_qa_dataloader(
     max_answer_len: int = 256,
     num_workers: int = 4,
     shuffle: bool = True,
+    max_samples: int | None = None,
 ) -> DataLoader:
     dataset = QADataset(data_path, tokenizer, max_context_len, max_prompt_len, max_answer_len)
+    if max_samples is not None and len(dataset) > max_samples:
+        dataset = torch.utils.data.Subset(dataset, range(max_samples))
     return DataLoader(
         dataset,
         batch_size=batch_size,

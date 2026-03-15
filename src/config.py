@@ -77,6 +77,8 @@ class QCPCConfig:
     eval_interval: int = 500
     save_interval: int = 1000
     output_dir: str = "./outputs"
+    wandb_project: str = "qcpc"
+    eval_samples: int = 200
 
     # --- Auto batch size ---
     auto_batch_size: bool = True               # Enable automatic batch size probing
