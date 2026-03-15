@@ -78,18 +78,6 @@ def apply_overrides(config: QCPCConfig, overrides: list[str]) -> QCPCConfig:
     return QCPCConfig.from_dict(d)
 
 
-def _get_mode_suffix(config: QCPCConfig) -> str:
-    """Return a human-readable mode suffix based on config switches."""
-    if config.use_decoupled_rope and config.use_prompt_bias:
-        return "full"
-    elif config.use_decoupled_rope and not config.use_prompt_bias:
-        return "rope"
-    elif not config.use_decoupled_rope and config.use_prompt_bias:
-        return "bias"
-    else:
-        return "baseline"
-
-
 def _resolve_batch_params(
     model: nn.Module,
     config: QCPCConfig,
@@ -221,9 +209,8 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
         start_epoch = ckpt.get("epoch", 0)
         global_step = ckpt.get("global_step", 0)
 
-    # Output dir with mode suffix
-    mode = _get_mode_suffix(config)
-    output_dir = Path(config.output_dir) / mode / "stage1"
+    # Output dir
+    output_dir = Path(config.output_dir) / "stage1"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Training loop
@@ -361,9 +348,8 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         model, optimizer, train_loader, scheduler
     )
 
-    # Output dir with mode suffix
-    mode = _get_mode_suffix(config)
-    output_dir = Path(config.output_dir) / mode / "stage2"
+    # Output dir
+    output_dir = Path(config.output_dir) / "stage2"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Training loop
