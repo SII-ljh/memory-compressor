@@ -477,92 +477,77 @@ def process_sft(input_dir: Path, output_dir: Path, force: bool = False, seed: in
         print(f"          请先运行: python scripts/data/data_downloader.py --task sft")
         return
 
-    train_samples = []
-    dev_samples = []
+    all_samples = []
     rng = random.Random(seed)
+    eval_size = 2000
 
     print(f"\n  [SFT] 处理 SFT 数据集")
 
-    # --- 1. FaithEval ×3 (test only → 80/20 split) ---
+    # --- 1. FaithEval ×3 ---
     for filename, source in FAITHEVAL_FILES:
         path = sft_dir / filename
         records = read_jsonl(path)
         if not records:
             continue
         converted = convert_faitheval(records, source)
-        rng.shuffle(converted)
-        split_idx = int(len(converted) * 0.8)
-        train_samples.extend(converted[:split_idx])
-        dev_samples.extend(converted[split_idx:])
-        print(f"    {source}: {len(converted)} → train {split_idx}, dev {len(converted) - split_idx}")
+        all_samples.extend(converted)
+        print(f"    {source}: {len(converted)}")
 
-    # --- 2. ConflictQA (test only → 80/20 split) ---
+    # --- 2. ConflictQA ---
     records = read_jsonl(sft_dir / "conflictqa.jsonl")
     if records:
         converted = convert_conflictqa(records)
-        rng.shuffle(converted)
-        split_idx = int(len(converted) * 0.8)
-        train_samples.extend(converted[:split_idx])
-        dev_samples.extend(converted[split_idx:])
-        print(f"    conflictqa: {len(converted)} → train {split_idx}, dev {len(converted) - split_idx}")
+        all_samples.extend(converted)
+        print(f"    conflictqa: {len(converted)}")
 
-    # --- 3. HotpotQA (train → train, validation → dev) ---
-    records = read_jsonl(sft_dir / "hotpotqa_train.jsonl")
-    if records:
-        converted = convert_hotpotqa(records)
-        train_samples.extend(converted)
-        print(f"    hotpotqa_train: {len(records)} → {len(converted)} train")
+    # --- 3. HotpotQA ---
+    for split in ("train", "validation"):
+        records = read_jsonl(sft_dir / f"hotpotqa_{split}.jsonl")
+        if records:
+            converted = convert_hotpotqa(records)
+            all_samples.extend(converted)
+            print(f"    hotpotqa_{split}: {len(records)} → {len(converted)}")
 
-    records = read_jsonl(sft_dir / "hotpotqa_validation.jsonl")
-    if records:
-        converted = convert_hotpotqa(records)
-        dev_samples.extend(converted)
-        print(f"    hotpotqa_validation: {len(records)} → {len(converted)} dev")
+    # --- 4. SQuAD v2 ---
+    for split in ("train", "validation"):
+        records = read_jsonl(sft_dir / f"squad_v2_{split}.jsonl")
+        if records:
+            converted = convert_squad_v2(records)
+            all_samples.extend(converted)
+            print(f"    squad_v2_{split}: {len(records)} → {len(converted)}")
 
-    # --- 4. SQuAD v2 (train → train, validation → dev) ---
-    records = read_jsonl(sft_dir / "squad_v2_train.jsonl")
-    if records:
-        converted = convert_squad_v2(records)
-        train_samples.extend(converted)
-        print(f"    squad_v2_train: {len(records)} → {len(converted)} train")
-
-    records = read_jsonl(sft_dir / "squad_v2_validation.jsonl")
-    if records:
-        converted = convert_squad_v2(records)
-        dev_samples.extend(converted)
-        print(f"    squad_v2_validation: {len(records)} → {len(converted)} dev")
-
-    # --- 5. NQ validation → dev ---
+    # --- 5. NQ ---
     records = read_jsonl(sft_dir / "nq_validation.jsonl")
     if records:
         converted = convert_natural_questions(records)
-        dev_samples.extend(converted)
-        print(f"    nq_validation: {len(records)} → {len(converted)} dev")
+        all_samples.extend(converted)
+        print(f"    nq_validation: {len(records)} → {len(converted)}")
 
-    # --- 6. GSM8K (train → train, test → dev) ---
-    records = read_jsonl(sft_dir / "gsm8k_train.jsonl")
-    if records:
-        converted = convert_gsm8k(records)
-        train_samples.extend(converted)
-        print(f"    gsm8k_train: {len(records)} → {len(converted)} train")
-
-    records = read_jsonl(sft_dir / "gsm8k_test.jsonl")
-    if records:
-        converted = convert_gsm8k(records)
-        dev_samples.extend(converted)
-        print(f"    gsm8k_test: {len(records)} → {len(converted)} dev")
+    # --- 6. GSM8K ---
+    for split in ("train", "test"):
+        records = read_jsonl(sft_dir / f"gsm8k_{split}.jsonl")
+        if records:
+            converted = convert_gsm8k(records)
+            all_samples.extend(converted)
+            print(f"    gsm8k_{split}: {len(records)} → {len(converted)}")
 
     # --- 清洗 ---
-    train_samples = clean_data(train_samples, "SFT/train")
-    dev_samples = clean_data(dev_samples, "SFT/eval_pool")
+    all_samples = clean_data(all_samples, "SFT/all")
+    print(f"\n  总样本数: {len(all_samples)}")
 
-    # 从 dev_samples 中取一半作为 eval, 另一半并入 train
-    rng.shuffle(dev_samples)
-    eval_size = len(dev_samples) // 2
-    eval_samples = dev_samples[:eval_size]
-    train_samples.extend(dev_samples[eval_size:])
+    # --- 按来源分层抽样 eval，保证 eval 中各来源比例与总体一致 ---
+    by_source: dict[str, list] = {}
+    for s in all_samples:
+        by_source.setdefault(s["source"], []).append(s)
 
-    # --- 打乱 & 保存 ---
+    eval_samples = []
+    train_samples = []
+    for source, items in by_source.items():
+        rng.shuffle(items)
+        n_eval = max(1, round(eval_size * len(items) / len(all_samples)))
+        eval_samples.extend(items[:n_eval])
+        train_samples.extend(items[n_eval:])
+
     rng.shuffle(train_samples)
     rng.shuffle(eval_samples)
 
@@ -572,7 +557,6 @@ def process_sft(input_dir: Path, output_dir: Path, force: bool = False, seed: in
     print(f"\n  [Stage 2 Done] train: {len(train_samples)} samples → {train_path}")
     print(f"                 eval:  {len(eval_samples)} samples → {eval_path}")
 
-    # 来源分布
     train_sources = Counter(s["source"] for s in train_samples)
     eval_sources = Counter(s["source"] for s in eval_samples)
     print(f"  Train sources: {dict(train_sources)}")
