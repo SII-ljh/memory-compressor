@@ -139,13 +139,6 @@ def _probe_max_batch_size(model, optimizer, max_seq_len, device,
     return safe_bs
 
 
-def _scan_max_seq_len(dataset):
-    """Scan dataset to find actual max sequence length."""
-    max_len = 0
-    for i in range(len(dataset)):
-        max_len = max(max_len, len(dataset[i]["input_ids"]))
-    return max_len
-
 
 # ---------------------------------------------------------------------------
 # Distributed helpers
@@ -268,20 +261,12 @@ def main():
         lr=args.lr, weight_decay=args.weight_decay,
     )
 
-    # ---- Dataset ----
-    train_dataset = QAFineTuneDataset(config.sft_train_data_path, tokenizer, args.max_seq_len)
-    dev_dataset = QAFineTuneDataset(config.sft_eval_data_path, tokenizer, args.max_seq_len)
-    if is_main:
-        logger.info(f"Train: {len(train_dataset)}, Dev: {len(dev_dataset)}")
-
-    # ---- Scan actual max seq len & probe batch size (rank 0 only) ----
+    # ---- Auto batch size probe (rank 0, before dataset/DDP) ----
     per_gpu_bs = args.batch_size
     if per_gpu_bs <= 0 and torch.cuda.is_available():
         if is_main:
-            actual_max = _scan_max_seq_len(train_dataset)
-            probe_seq_len = min(args.max_seq_len, ((actual_max + 63) // 64) * 64)
-            logger.info(f"Dataset max_len={actual_max}, probe_seq_len={probe_seq_len}")
-            per_gpu_bs = _probe_max_batch_size(model, optimizer, probe_seq_len, device)
+            per_gpu_bs = _probe_max_batch_size(
+                model, optimizer, args.max_seq_len, device)
             bs_tensor = torch.tensor([per_gpu_bs], device=device)
         else:
             bs_tensor = torch.tensor([0], device=device)
@@ -291,6 +276,12 @@ def main():
         per_gpu_bs = bs_tensor.item()
     elif per_gpu_bs <= 0:
         per_gpu_bs = 4
+
+    # ---- Dataset (after probe, so user sees probe result fast) ----
+    train_dataset = QAFineTuneDataset(config.sft_train_data_path, tokenizer, args.max_seq_len)
+    dev_dataset = QAFineTuneDataset(config.sft_eval_data_path, tokenizer, args.max_seq_len)
+    if is_main:
+        logger.info(f"Train: {len(train_dataset)}, Dev: {len(dev_dataset)}")
 
     # ---- Grad accum ----
     if args.grad_accum > 0:
