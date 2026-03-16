@@ -108,16 +108,23 @@ if [[ "${STAGE}" == "all" || "${STAGE}" == "2" ]]; then
 
         # --- Finetune ---
         if [[ "${SKIP_FINETUNE}" == "false" ]]; then
-            echo ">>> [${MODEL_NAME}] LoRA finetune (1 epoch)..."
-            accelerate launch --num_processes "${NUM_GPUS}" --multi_gpu \
-              scripts/benchmark/stage2_finetune.py \
-                --config "${CONFIG}" \
-                --model_path "${MODEL_PATH}" \
-                --epochs 1 \
-                --lr 2e-4 \
-                --lora_rank 32 \
-                --eval_interval 100 \
+            FINETUNE_ARGS=(
+                scripts/benchmark/stage2_finetune.py
+                --config "${CONFIG}"
+                --model_path "${MODEL_PATH}"
+                --epochs 1
+                --lr 2e-4
+                --lora_rank 32
+                --eval_interval 100
                 --output_dir "${FT_OUTPUT}"
+            )
+            if [[ ${NUM_GPUS} -gt 1 ]]; then
+                echo ">>> [${MODEL_NAME}] LoRA finetune (1 epoch, ${NUM_GPUS} GPUs)..."
+                torchrun --nproc_per_node="${NUM_GPUS}" "${FINETUNE_ARGS[@]}"
+            else
+                echo ">>> [${MODEL_NAME}] LoRA finetune (1 epoch, single GPU)..."
+                python "${FINETUNE_ARGS[@]}"
+            fi
         else
             echo ">>> [${MODEL_NAME}] Skipping finetune, using existing: ${LORA_PATH}"
         fi
