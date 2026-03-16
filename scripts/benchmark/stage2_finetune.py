@@ -55,11 +55,12 @@ PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
 
 
 def _probe_max_batch_size(model, max_seq_len, device, train_mode=False,
-                          upper_bound=256, safety_margin=0.85):
+                          upper_bound=128, safety_margin=0.85):
     """Binary search for max batch size that fits in GPU memory.
 
-    Uses max_seq_len as worst-case, so the result is already conservative.
-    Applies safety_margin to leave room for optimizer states and other overhead.
+    Simulates a full training step (forward + backward + optimizer.step) to
+    account for optimizer states and gradient buffers. Applies safety_margin
+    to leave room for DDP overhead not captured in single-GPU probing.
     """
     lo, hi = 1, upper_bound
     best = 1
@@ -71,6 +72,13 @@ def _probe_max_batch_size(model, max_seq_len, device, train_mode=False,
         model.train()
     else:
         model.eval()
+
+    # Create a temporary optimizer to capture optimizer state memory
+    probe_optimizer = None
+    if train_mode:
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        if trainable:
+            probe_optimizer = torch.optim.AdamW(trainable, lr=1e-4)
 
     while lo <= hi:
         mid = (lo + hi) // 2
@@ -85,7 +93,11 @@ def _probe_max_batch_size(model, max_seq_len, device, train_mode=False,
             if train_mode:
                 outputs = model(**dummy)
                 outputs.loss.backward()
-                model.zero_grad(set_to_none=True)
+                if probe_optimizer is not None:
+                    probe_optimizer.step()
+                    probe_optimizer.zero_grad(set_to_none=True)
+                else:
+                    model.zero_grad(set_to_none=True)
             else:
                 with torch.no_grad():
                     model(**dummy)
@@ -94,13 +106,21 @@ def _probe_max_batch_size(model, max_seq_len, device, train_mode=False,
             logger.info(f"  bs={mid} OK (best={best})")
         except torch.cuda.OutOfMemoryError:
             if train_mode:
-                model.zero_grad(set_to_none=True)
+                if probe_optimizer is not None:
+                    probe_optimizer.zero_grad(set_to_none=True)
+                else:
+                    model.zero_grad(set_to_none=True)
             hi = mid - 1
             logger.info(f"  bs={mid} OOM (shrink to {hi})")
         finally:
             del outputs, dummy
             gc.collect()
             torch.cuda.empty_cache()
+
+    # Clean up probe optimizer
+    del probe_optimizer
+    gc.collect()
+    torch.cuda.empty_cache()
 
     if was_training:
         model.train()
