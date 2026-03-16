@@ -300,7 +300,13 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
         drop_last=False,
     )
 
-    # LR scheduler (total_steps = optimizer steps, not micro-batches)
+    # Prepare with accelerator FIRST (so len(train_loader) reflects distributed split)
+    model, optimizer, train_loader = accelerator.prepare(
+        model, optimizer, train_loader,
+    )
+    eval_loader = accelerator.prepare(eval_loader)
+
+    # LR scheduler (compute AFTER prepare so len(train_loader) = per-GPU batches)
     steps_per_epoch = math.ceil(len(train_loader) / accum_steps)
     total_steps = steps_per_epoch * config.stage1_max_epochs
     warmup_steps = int(total_steps * config.stage1_warmup_ratio)
@@ -310,17 +316,11 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
 
     if accelerator.is_main_process:
         logger.info(
-            f"Batches/epoch: {len(train_loader)}, "
+            f"Batches/epoch (per GPU): {len(train_loader)}, "
             f"optimizer steps/epoch: {steps_per_epoch}, "
             f"total optimizer steps: {total_steps}, warmup: {warmup_steps}, "
             f"epochs: {config.stage1_max_epochs}"
         )
-
-    # Prepare with accelerator
-    model, optimizer, train_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, scheduler
-    )
-    eval_loader = accelerator.prepare(eval_loader)
 
     # Resume checkpoint (perceiver-only state dict)
     start_epoch = 0
@@ -361,7 +361,6 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
                     accelerator.clip_grad_norm_(trainable_params, config.stage1_grad_clip)
 
                 optimizer.step()
-                scheduler.step()
                 optimizer.zero_grad()
 
             epoch_loss += loss.item()
@@ -369,6 +368,7 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
 
             # Only count optimizer steps (not micro-batches)
             if accelerator.sync_gradients:
+                scheduler.step()
                 global_step += 1
 
                 if global_step % config.log_interval == 0 and accelerator.is_main_process:
@@ -545,7 +545,13 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         drop_last=False,
     )
 
-    # LR scheduler (total_steps = optimizer steps, not micro-batches)
+    # Prepare with accelerator FIRST (so len(train_loader) reflects distributed split)
+    model, optimizer, train_loader = accelerator.prepare(
+        model, optimizer, train_loader,
+    )
+    eval_loader = accelerator.prepare(eval_loader)
+
+    # LR scheduler (compute AFTER prepare so len(train_loader) = per-GPU batches)
     steps_per_epoch = math.ceil(len(train_loader) / accum_steps)
     total_steps = steps_per_epoch * config.stage2_max_epochs
     warmup_steps = int(total_steps * config.stage2_warmup_ratio)
@@ -555,17 +561,11 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
 
     if accelerator.is_main_process:
         logger.info(
-            f"Batches/epoch: {len(train_loader)}, "
+            f"Batches/epoch (per GPU): {len(train_loader)}, "
             f"optimizer steps/epoch: {steps_per_epoch}, "
             f"total optimizer steps: {total_steps}, warmup: {warmup_steps}, "
             f"epochs: {config.stage2_max_epochs}"
         )
-
-    # Prepare
-    model, optimizer, train_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, scheduler
-    )
-    eval_loader = accelerator.prepare(eval_loader)
 
     # Output dir
     output_dir = Path(config.output_dir) / "stage2"
@@ -597,7 +597,6 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
                     accelerator.clip_grad_norm_(trainable_params, config.stage2_grad_clip)
 
                 optimizer.step()
-                scheduler.step()
                 optimizer.zero_grad()
 
             epoch_loss += loss.item()
@@ -605,6 +604,7 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
 
             # Only count optimizer steps (not micro-batches)
             if accelerator.sync_gradients:
+                scheduler.step()
                 global_step += 1
 
                 if global_step % config.log_interval == 0 and accelerator.is_main_process:
