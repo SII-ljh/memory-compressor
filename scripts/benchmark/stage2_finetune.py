@@ -22,6 +22,7 @@ Requires: pip install peft
 """
 
 import argparse
+import gc
 import json
 import logging
 import math
@@ -71,6 +72,8 @@ def _probe_max_batch_size(model, max_seq_len, device, train_mode=False, upper_bo
 
     while lo <= hi:
         mid = (lo + hi) // 2
+        outputs = None
+        dummy = None
         try:
             dummy = {
                 "input_ids": torch.ones(mid, max_seq_len, dtype=torch.long, device=device),
@@ -93,6 +96,8 @@ def _probe_max_batch_size(model, max_seq_len, device, train_mode=False, upper_bo
             hi = mid - 1
             logger.info(f"  bs={mid} OOM (shrink to {hi})")
         finally:
+            del outputs, dummy
+            gc.collect()
             torch.cuda.empty_cache()
 
     if was_training:
@@ -239,6 +244,7 @@ def main():
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
     model = get_peft_model(model, lora_config)
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(f"LoRA trainable params: {trainable_params:,} / {total_params:,} "
