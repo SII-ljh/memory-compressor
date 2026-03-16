@@ -65,6 +65,27 @@ def _mode_name(config: QCPCConfig) -> str:
         return "baseline"
 
 
+def _find_latest_checkpoint(ckpt_dir: Path) -> Path | None:
+    """Find the latest checkpoint in a directory.
+
+    Priority: final.pt > latest step_*.pt > best.pt
+    """
+    final = ckpt_dir / "final.pt"
+    if final.exists():
+        return final
+    step_ckpts = sorted(
+        ckpt_dir.glob("step_*.pt"),
+        key=lambda p: int(p.stem.split("_")[1]),
+        reverse=True,
+    )
+    if step_ckpts:
+        return step_ckpts[0]
+    best = ckpt_dir / "best.pt"
+    if best.exists():
+        return best
+    return None
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="QCPC Training")
     parser.add_argument("--config", type=str, default="config/default.yaml")
@@ -322,6 +343,19 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
             f"epochs: {config.stage1_max_epochs}"
         )
 
+    # Output dir (compute early for auto-checkpoint detection)
+    output_dir = Path(config.output_dir) / "stage1"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-detect checkpoint if --resume not given
+    if not resume_path:
+        auto_ckpt = _find_latest_checkpoint(output_dir)
+        if auto_ckpt:
+            resume_path = str(auto_ckpt)
+            logger.info(f"Auto-detected checkpoint: {resume_path}")
+        else:
+            logger.info("No checkpoint found, training from scratch")
+
     # Resume checkpoint (perceiver-only state dict)
     start_epoch = 0
     global_step = 0
@@ -334,9 +368,7 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
         start_epoch = ckpt.get("epoch", 0)
         global_step = ckpt.get("global_step", 0)
 
-        # Fast-forward scheduler to match restored global_step
-        # so the LR curve continues seamlessly (works for both
-        # exact resume and extended max_epochs)
+        # Fast-forward scheduler so LR curve continues seamlessly
         if global_step > 0:
             for _ in range(global_step):
                 scheduler.step()
@@ -344,9 +376,15 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
                 lr = optimizer.param_groups[0]["lr"]
                 logger.info(f"Resumed scheduler to step {global_step}, lr={lr:.2e}")
 
-    # Output dir
-    output_dir = Path(config.output_dir) / "stage1"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Check if training is already complete
+    if start_epoch >= config.stage1_max_epochs:
+        if accelerator.is_main_process:
+            logger.warning(
+                f"Checkpoint epoch ({start_epoch}) >= max_epochs ({config.stage1_max_epochs}). "
+                f"Increase stage1_max_epochs to continue training."
+            )
+            wandb.finish()
+        return
 
     # Training loop
     model.train()
@@ -453,12 +491,34 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
     model = QCPC(config)
     model.set_stage(2)
 
-    # Load stage 1 checkpoint (perceiver-only state dict)
-    if resume_path:
-        logger.info(f"Loading stage 1 weights from {resume_path}")
-        ckpt = torch.load(resume_path, map_location="cpu")
+    # Auto-detect: stage2 checkpoint (full resume) or stage1 checkpoint (init)
+    s2_dir = Path(config.output_dir) / "stage2"
+    s1_dir = Path(config.output_dir) / "stage1"
+    s2_ckpt_path = None  # for full stage2 resume
+    s1_init_path = None  # for stage1 weight init
+
+    s2_auto = _find_latest_checkpoint(s2_dir)
+    if s2_auto:
+        s2_ckpt_path = str(s2_auto)
+        logger.info(f"Auto-detected stage2 checkpoint: {s2_ckpt_path}")
+    elif resume_path:
+        s1_init_path = resume_path
+    else:
+        # Auto-detect stage1 best/final for init
+        for name in ["best.pt", "final.pt"]:
+            p = s1_dir / name
+            if p.exists():
+                s1_init_path = str(p)
+                logger.info(f"Auto-detected stage1 checkpoint for init: {s1_init_path}")
+                break
+        if not s1_init_path:
+            logger.warning("No stage1 checkpoint found for initialization!")
+
+    # Load stage1 weights for init (only if NOT doing stage2 resume)
+    if s1_init_path and not s2_ckpt_path:
+        logger.info(f"Loading stage 1 weights from {s1_init_path}")
+        ckpt = torch.load(s1_init_path, map_location="cpu")
         model.perceiver.load_state_dict(ckpt["model"], strict=False)
-        # Re-set stage 2 after loading (ensure prompt bias params are unfrozen)
         model.set_stage(2)
 
     counts = model.count_params()
@@ -581,12 +641,41 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
     output_dir = Path(config.output_dir) / "stage2"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Full stage2 resume (model + optimizer + epoch + step + scheduler)
+    start_epoch = 0
+    global_step = 0
+    if s2_ckpt_path:
+        logger.info(f"Resuming stage2 from {s2_ckpt_path}")
+        ckpt = torch.load(s2_ckpt_path, map_location="cpu")
+        model.perceiver.load_state_dict(ckpt["model"], strict=False)
+        model.set_stage(2)
+        if "optimizer" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer"])
+        start_epoch = ckpt.get("epoch", 0)
+        global_step = ckpt.get("global_step", 0)
+
+        if global_step > 0:
+            for _ in range(global_step):
+                scheduler.step()
+            if accelerator.is_main_process:
+                lr = optimizer.param_groups[0]["lr"]
+                logger.info(f"Resumed scheduler to step {global_step}, lr={lr:.2e}")
+
+    # Check if training is already complete
+    if start_epoch >= config.stage2_max_epochs:
+        if accelerator.is_main_process:
+            logger.warning(
+                f"Checkpoint epoch ({start_epoch}) >= max_epochs ({config.stage2_max_epochs}). "
+                f"Increase stage2_max_epochs to continue training."
+            )
+            wandb.finish()
+        return
+
     # Training loop
     model.train()
     best_eval_loss = float("inf")
-    global_step = 0
 
-    for epoch in range(config.stage2_max_epochs):
+    for epoch in range(start_epoch, config.stage2_max_epochs):
         epoch_loss = 0.0
         num_micro_batches = 0
 
