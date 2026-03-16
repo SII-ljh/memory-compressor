@@ -92,7 +92,11 @@ def collate_fn(batch):
 
 @torch.no_grad()
 def evaluate_direct_ntp(model, dataloader, device):
-    """Evaluate Qwen3 direct NTP, loss on continuation tokens only."""
+    """Evaluate Qwen3 direct NTP, loss on continuation tokens only.
+
+    Uses HuggingFace's built-in labels mechanism (with -100 masking)
+    instead of manually reshaping logits, which avoids OOM on large vocab.
+    """
     model.eval()
     total_loss = 0.0
     total_tokens = 0
@@ -101,27 +105,25 @@ def evaluate_direct_ntp(model, dataloader, device):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         split_points = batch["split_points"]
+        B, T = input_ids.shape
 
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
-        logits = outputs.logits
-        B, T, V = logits.shape
-
-        loss_fct = nn.CrossEntropyLoss(reduction="none")
-        shift_logits = logits[:, :-1, :]
-        shift_labels = input_ids[:, 1:]
-        per_token_loss = loss_fct(shift_logits.reshape(-1, V), shift_labels.reshape(-1)).view(B, T - 1)
-
-        cont_mask = torch.zeros(B, T - 1, device=device)
+        # Build labels: -100 for context/padding, real token ids for continuation
+        labels = torch.full_like(input_ids, -100)
         for i in range(B):
             sp = split_points[i].item()
-            seq_len = attention_mask[i].sum().item()
-            start = max(sp - 1, 0)
-            end = int(seq_len) - 1
-            if end > start:
-                cont_mask[i, start:end] = 1.0
+            seq_len = int(attention_mask[i].sum().item())
+            if seq_len > sp:
+                labels[i, sp:seq_len] = input_ids[i, sp:seq_len]
 
-        total_loss += (per_token_loss * cont_mask).sum().item()
-        total_tokens += cont_mask.sum().item()
+        outputs = model(
+            input_ids=input_ids, attention_mask=attention_mask,
+            labels=labels, use_cache=False,
+        )
+
+        # HuggingFace internally shifts: loss is over labels[:, 1:] != -100
+        n_tokens = (labels[:, 1:] != -100).sum().item()
+        total_loss += outputs.loss.item() * n_tokens
+        total_tokens += n_tokens
 
     avg_loss = total_loss / max(total_tokens, 1)
     ppl = math.exp(min(avg_loss, 20))
@@ -129,7 +131,7 @@ def evaluate_direct_ntp(model, dataloader, device):
 
 
 def _probe_max_batch_size(model, max_seq_len, device, upper_bound=128, safety_margin=0.85):
-    """Binary search for max batch size (inference) that fits in GPU memory."""
+    """Binary search for max batch size (inference + loss) that fits in GPU memory."""
     lo, hi = 1, upper_bound
     best = 1
     logger.info(f"Auto batch probe: searching [{lo}, {hi}] on {device} (seq_len={max_seq_len})")
@@ -139,8 +141,10 @@ def _probe_max_batch_size(model, max_seq_len, device, upper_bound=128, safety_ma
         try:
             dummy_ids = torch.ones(mid, max_seq_len, dtype=torch.long, device=device)
             dummy_mask = torch.ones(mid, max_seq_len, dtype=torch.long, device=device)
+            dummy_labels = torch.ones(mid, max_seq_len, dtype=torch.long, device=device)
             with torch.no_grad():
-                model(input_ids=dummy_ids, attention_mask=dummy_mask, use_cache=False)
+                model(input_ids=dummy_ids, attention_mask=dummy_mask,
+                      labels=dummy_labels, use_cache=False)
             best = mid
             lo = mid + 1
             logger.info(f"  bs={mid} OK (best={best})")
