@@ -195,7 +195,7 @@ def main():
     # Create Accelerator with gradient accumulation
     accelerator = Accelerator(
         gradient_accumulation_steps=args.grad_accum,
-        mixed_precision="no",
+        mixed_precision="bf16",
     )
 
     torch.manual_seed(args.seed)
@@ -214,7 +214,7 @@ def main():
         logger.info(f"Loading Qwen3 from {config.qwen3_model_path}")
     tokenizer = AutoTokenizer.from_pretrained(config.qwen3_model_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        config.qwen3_model_path, trust_remote_code=True, torch_dtype=torch.float32,
+        config.qwen3_model_path, trust_remote_code=True, torch_dtype=torch.bfloat16,
     )
 
     # Apply LoRA

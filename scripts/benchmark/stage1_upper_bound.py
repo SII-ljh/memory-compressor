@@ -150,7 +150,7 @@ def main():
     logger.info(f"Loading Qwen3 from {config.qwen3_model_path}")
     tokenizer = AutoTokenizer.from_pretrained(config.qwen3_model_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        config.qwen3_model_path, trust_remote_code=True, torch_dtype=torch.float32,
+        config.qwen3_model_path, trust_remote_code=True, torch_dtype=torch.bfloat16,
     )
     model.eval()
 
