@@ -214,12 +214,41 @@ def evaluate_generation(model, records, tokenizer, device, with_context, max_seq
     }
 
 
+def _probe_max_batch_size(model, max_seq_len, device, upper_bound=128, safety_margin=0.85):
+    """Binary search for max batch size (inference) that fits in GPU memory."""
+    lo, hi = 1, upper_bound
+    best = 1
+    logger.info(f"Auto batch probe: searching [{lo}, {hi}] on {device} (seq_len={max_seq_len})")
+    model.eval()
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        try:
+            dummy = {
+                "input_ids": torch.ones(mid, max_seq_len, dtype=torch.long, device=device),
+                "attention_mask": torch.ones(mid, max_seq_len, dtype=torch.long, device=device),
+                "labels": torch.ones(mid, max_seq_len, dtype=torch.long, device=device),
+            }
+            with torch.no_grad():
+                model(**dummy)
+            best = mid
+            lo = mid + 1
+            logger.info(f"  bs={mid} OK (best={best})")
+        except torch.cuda.OutOfMemoryError:
+            hi = mid - 1
+            logger.info(f"  bs={mid} OOM (shrink to {hi})")
+        finally:
+            torch.cuda.empty_cache()
+    safe_bs = max(1, int(best * safety_margin))
+    logger.info(f"Auto batch probe done: max={best}, safe={safe_bs}")
+    return safe_bs
+
+
 def run_one_mode(model, tokenizer, records, device, with_context, max_seq_len, batch_size, max_new_tokens):
     mode = "Upper Bound (with context)" if with_context else "Lower Bound (question only)"
     logger.info(f"\n--- {mode} ({len(records)} samples) ---")
 
     ds = EvalLossDataset(records, tokenizer, with_context, max_seq_len)
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_loss, num_workers=0)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_loss, num_workers=4)
     avg_loss, ppl = evaluate_loss(model, loader, device)
 
     gen = evaluate_generation(model, records, tokenizer, device, with_context, max_seq_len, max_new_tokens)
@@ -235,7 +264,8 @@ def main():
                         help="Override qwen3_model_path from config")
     parser.add_argument("--lora_path", type=str, required=True)
     parser.add_argument("--mode", choices=["both", "upper", "lower"], default="both")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=0,
+                        help="Batch size (0 = auto-detect)")
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--max_seq_len", type=int, default=4096)
     parser.add_argument("--output", type=str, default="./outputs/benchmark/stage2_eval_results.json")
@@ -274,17 +304,25 @@ def main():
     model.eval()
     logger.info(f"Device: {device}")
 
+    # Auto batch size
+    batch_size = args.batch_size
+    if batch_size <= 0 and device.type == "cuda":
+        batch_size = _probe_max_batch_size(model, args.max_seq_len, device)
+    elif batch_size <= 0:
+        batch_size = 4
+    logger.info(f"Using batch_size={batch_size}")
+
     results = {"benchmark": "stage2_eval", "model": config.qwen3_model_path, "lora_path": args.lora_path}
 
     if args.mode in ("both", "upper"):
         results["upper_bound"] = run_one_mode(
             model, tokenizer, records, device, with_context=True,
-            max_seq_len=args.max_seq_len, batch_size=args.batch_size, max_new_tokens=args.max_new_tokens,
+            max_seq_len=args.max_seq_len, batch_size=batch_size, max_new_tokens=args.max_new_tokens,
         )
     if args.mode in ("both", "lower"):
         results["lower_bound"] = run_one_mode(
             model, tokenizer, records, device, with_context=False,
-            max_seq_len=args.max_seq_len, batch_size=args.batch_size, max_new_tokens=args.max_new_tokens,
+            max_seq_len=args.max_seq_len, batch_size=batch_size, max_new_tokens=args.max_new_tokens,
         )
 
     # Print summary

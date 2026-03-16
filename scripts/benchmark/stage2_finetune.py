@@ -10,12 +10,13 @@ Uses data from data_processor.py:
 Format: [{"context": str, "question": str, "answer": str, "source": str}]
 
 Usage:
-    # Multi-GPU (auto-detect):
+    # Multi-GPU (auto batch size):
     accelerate launch --multi_gpu \
       scripts/benchmark/stage2_finetune.py --config config/default.yaml
 
-    # Single GPU:
-    python scripts/benchmark/stage2_finetune.py --config config/default.yaml
+    # Override batch size:
+    accelerate launch --multi_gpu \
+      scripts/benchmark/stage2_finetune.py --config config/default.yaml --batch_size 8
 
 Requires: pip install peft
 """
@@ -24,6 +25,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -51,25 +53,62 @@ logger = logging.getLogger(__name__)
 PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
 
 
+def _probe_max_batch_size(model, max_seq_len, device, train_mode=False,
+                          upper_bound=128, safety_margin=0.85):
+    """Binary search for max batch size that fits in GPU memory."""
+    lo, hi = 1, upper_bound
+    best = 1
+    logger.info(f"Auto batch probe: searching [{lo}, {hi}] on {device} "
+                f"(seq_len={max_seq_len}, train={train_mode})")
+
+    was_training = model.training
+    if train_mode:
+        model.train()
+    else:
+        model.eval()
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        try:
+            dummy = {
+                "input_ids": torch.ones(mid, max_seq_len, dtype=torch.long, device=device),
+                "attention_mask": torch.ones(mid, max_seq_len, dtype=torch.long, device=device),
+                "labels": torch.ones(mid, max_seq_len, dtype=torch.long, device=device),
+            }
+            if train_mode:
+                outputs = model(**dummy)
+                outputs.loss.backward()
+                model.zero_grad(set_to_none=True)
+            else:
+                with torch.no_grad():
+                    model(**dummy)
+            best = mid
+            lo = mid + 1
+            logger.info(f"  bs={mid} OK (best={best})")
+        except torch.cuda.OutOfMemoryError:
+            if train_mode:
+                model.zero_grad(set_to_none=True)
+            hi = mid - 1
+            logger.info(f"  bs={mid} OOM (shrink to {hi})")
+        finally:
+            torch.cuda.empty_cache()
+
+    if was_training:
+        model.train()
+    else:
+        model.eval()
+
+    safe_bs = max(1, int(best * safety_margin))
+    logger.info(f"Auto batch probe done: max={best}, safe={safe_bs}")
+    return safe_bs
+
+
 class QAFineTuneDataset(Dataset):
-    """QA dataset for direct Qwen3 fine-tuning.
+    """QA dataset for direct Qwen3 fine-tuning."""
 
-    Formats each sample as:
-        input:  "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
-        target: " {answer}<eos>"
-
-    Returns the full sequence with labels masked on the input portion.
-    """
-
-    def __init__(
-        self,
-        data_path: str,
-        tokenizer: AutoTokenizer,
-        max_seq_len: int = 4096,
-    ):
+    def __init__(self, data_path: str, tokenizer: AutoTokenizer, max_seq_len: int = 4096):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-
         with open(data_path, "r", encoding="utf-8") as f:
             self.records = json.load(f)
 
@@ -78,60 +117,41 @@ class QAFineTuneDataset(Dataset):
 
     def __getitem__(self, idx):
         rec = self.records[idx]
-
-        prompt = PROMPT_TEMPLATE.format(
-            context=rec["context"],
-            question=rec["question"],
-        )
+        prompt = PROMPT_TEMPLATE.format(context=rec["context"], question=rec["question"])
         answer = " " + rec["answer"]
 
         prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         answer_ids = self.tokenizer.encode(answer, add_special_tokens=False)
 
-        # Add EOS token
         eos_id = self.tokenizer.eos_token_id
         if eos_id is not None:
             answer_ids = answer_ids + [eos_id]
 
-        # Truncate if too long (prioritize keeping the answer)
         max_prompt_len = self.max_seq_len - len(answer_ids) - 1
         if max_prompt_len < 10:
-            # Answer too long, truncate answer
             answer_ids = answer_ids[:self.max_seq_len // 4]
             max_prompt_len = self.max_seq_len - len(answer_ids) - 1
         if len(prompt_ids) > max_prompt_len:
             prompt_ids = prompt_ids[:max_prompt_len]
 
         input_ids = prompt_ids + answer_ids
-        # Labels: -100 for prompt portion (no loss), actual ids for answer portion
         labels = [-100] * len(prompt_ids) + answer_ids
-
-        return {
-            "input_ids": input_ids,
-            "labels": labels,
-        }
+        return {"input_ids": input_ids, "labels": labels}
 
 
 def collate_fn(batch):
     """Pad sequences and labels to max length in batch."""
     max_len = max(len(item["input_ids"]) for item in batch)
     B = len(batch)
-
     input_ids = torch.zeros(B, max_len, dtype=torch.long)
     attention_mask = torch.zeros(B, max_len, dtype=torch.long)
     labels = torch.full((B, max_len), -100, dtype=torch.long)
-
     for i, item in enumerate(batch):
         seq_len = len(item["input_ids"])
         input_ids[i, :seq_len] = torch.tensor(item["input_ids"], dtype=torch.long)
         attention_mask[i, :seq_len] = 1
         labels[i, :seq_len] = torch.tensor(item["labels"], dtype=torch.long)
-
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels,
-    }
+    return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
 
 @torch.no_grad()
@@ -140,7 +160,6 @@ def evaluate(model, dataloader, accelerator):
     model.eval()
     total_loss = 0.0
     total_tokens = 0
-
     for batch in dataloader:
         outputs = model(
             input_ids=batch["input_ids"],
@@ -152,7 +171,6 @@ def evaluate(model, dataloader, accelerator):
         total_loss += outputs.loss.item() * n_tokens
         total_tokens += n_tokens
 
-    # Reduce across GPUs
     loss_tensor = torch.tensor([total_loss], device=accelerator.device)
     tokens_tensor = torch.tensor([total_tokens], device=accelerator.device)
     loss_tensor = accelerator.reduce(loss_tensor, reduction="sum")
@@ -171,8 +189,12 @@ def main():
                         help="Override qwen3_model_path from config")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--grad_accum", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=0,
+                        help="Per-GPU batch size (0 = auto-detect)")
+    parser.add_argument("--target_ebs", type=int, default=256,
+                        help="Target effective batch size (used when batch_size=0)")
+    parser.add_argument("--grad_accum", type=int, default=0,
+                        help="Gradient accumulation steps (0 = auto from target_ebs)")
     parser.add_argument("--max_seq_len", type=int, default=4096,
                         help="Max sequence length (context + question + answer)")
     parser.add_argument("--lora_rank", type=int, default=32)
@@ -192,12 +214,6 @@ def main():
         level=logging.INFO,
     )
 
-    # Create Accelerator with gradient accumulation
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.grad_accum,
-        mixed_precision="bf16",
-    )
-
     torch.manual_seed(args.seed)
     config = QCPCConfig.load(args.config)
     if args.model_path:
@@ -205,13 +221,9 @@ def main():
 
     train_path = config.sft_train_data_path
     dev_path = config.sft_eval_data_path
-    if accelerator.is_main_process:
-        logger.info(f"Train data: {train_path}")
-        logger.info(f"Dev data:   {dev_path}")
 
     # Load model & tokenizer
-    if accelerator.is_main_process:
-        logger.info(f"Loading Qwen3 from {config.qwen3_model_path}")
+    logger.info(f"Loading Qwen3 from {config.qwen3_model_path}")
     tokenizer = AutoTokenizer.from_pretrained(config.qwen3_model_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         config.qwen3_model_path, trust_remote_code=True, torch_dtype=torch.bfloat16,
@@ -228,9 +240,55 @@ def main():
     model = get_peft_model(model, lora_config)
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"LoRA trainable params: {trainable_params:,} / {total_params:,} "
+                f"({trainable_params/total_params*100:.2f}%)")
+
+    # --- Auto batch size probe (rank 0 only, before Accelerator) ---
+    rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    per_gpu_bs = args.batch_size
+
+    if per_gpu_bs <= 0 and torch.cuda.is_available():
+        device = torch.device(f"cuda:{rank}")
+        if rank == 0:
+            model.to(device)
+            per_gpu_bs = _probe_max_batch_size(
+                model, args.max_seq_len, device, train_mode=True,
+            )
+            model.to("cpu")
+            torch.cuda.empty_cache()
+            bs_tensor = torch.tensor([per_gpu_bs], dtype=torch.long, device=device)
+        else:
+            bs_tensor = torch.tensor([0], dtype=torch.long, device=device)
+
+        if world_size > 1:
+            if not torch.distributed.is_initialized():
+                torch.distributed.init_process_group(backend="nccl")
+            torch.distributed.broadcast(bs_tensor, src=0)
+        per_gpu_bs = bs_tensor.item()
+    elif per_gpu_bs <= 0:
+        per_gpu_bs = 4  # CPU fallback
+
+    # Compute grad_accum
+    if args.grad_accum > 0:
+        accum_steps = args.grad_accum
+    else:
+        per_step_total = per_gpu_bs * world_size
+        accum_steps = max(1, math.ceil(args.target_ebs / per_step_total))
+
+    actual_ebs = per_gpu_bs * world_size * accum_steps
+    logger.info(f"Batch config: per_gpu_bs={per_gpu_bs}, accum={accum_steps}, "
+                f"world_size={world_size}, effective_bs={actual_ebs}")
+
+    # Create Accelerator
+    accelerator = Accelerator(
+        gradient_accumulation_steps=accum_steps,
+        mixed_precision="bf16",
+    )
+
     if accelerator.is_main_process:
-        logger.info(f"LoRA trainable params: {trainable_params:,} / {total_params:,} "
-                    f"({trainable_params/total_params*100:.2f}%)")
+        logger.info(f"Train data: {train_path}")
+        logger.info(f"Dev data:   {dev_path}")
         logger.info(f"Devices: {accelerator.num_processes}")
 
     # Datasets
@@ -243,11 +301,11 @@ def main():
         logger.info(f"Train samples: {len(train_dataset)}, Dev samples: {len(dev_dataset)}")
 
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
+        train_dataset, batch_size=per_gpu_bs, shuffle=True,
         collate_fn=collate_fn, num_workers=4, drop_last=True,
     )
     dev_loader = DataLoader(
-        dev_dataset, batch_size=args.batch_size, shuffle=False,
+        dev_dataset, batch_size=per_gpu_bs, shuffle=False,
         collate_fn=collate_fn, num_workers=4,
     )
 
@@ -258,13 +316,13 @@ def main():
         weight_decay=args.weight_decay,
     )
 
-    # Prepare with Accelerator (handles device placement + distributed sharding)
+    # Prepare with Accelerator
     model, optimizer, train_loader, dev_loader = accelerator.prepare(
         model, optimizer, train_loader, dev_loader,
     )
 
-    # Scheduler (compute AFTER prepare so len(train_loader) reflects per-GPU batches)
-    steps_per_epoch = math.ceil(len(train_loader) / args.grad_accum)
+    # Scheduler
+    steps_per_epoch = math.ceil(len(train_loader) / accum_steps)
     total_steps = steps_per_epoch * args.epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
     warmup_scheduler = LinearLR(optimizer, start_factor=0.01, total_iters=max(warmup_steps, 1))
@@ -359,7 +417,6 @@ def main():
         unwrapped.save_pretrained(output_dir / "final_lora")
         tokenizer.save_pretrained(output_dir / "final_lora")
 
-        # Save training info
         info = {
             "benchmark": "stage2_finetune",
             "model": config.qwen3_model_path,
@@ -367,10 +424,10 @@ def main():
             "lora_alpha": args.lora_alpha,
             "epochs": args.epochs,
             "lr": args.lr,
-            "batch_size": args.batch_size,
-            "grad_accum": args.grad_accum,
+            "batch_size": per_gpu_bs,
+            "grad_accum": accum_steps,
             "num_gpus": accelerator.num_processes,
-            "effective_batch_size": args.batch_size * args.grad_accum * accelerator.num_processes,
+            "effective_batch_size": actual_ebs,
             "trainable_params": trainable_params,
             "total_params": total_params,
             "best_eval_loss": best_eval_loss,

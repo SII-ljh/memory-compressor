@@ -128,12 +128,39 @@ def evaluate_direct_ntp(model, dataloader, device):
     return {"loss": avg_loss, "ppl": ppl, "total_tokens": int(total_tokens)}
 
 
+def _probe_max_batch_size(model, max_seq_len, device, upper_bound=128, safety_margin=0.85):
+    """Binary search for max batch size (inference) that fits in GPU memory."""
+    lo, hi = 1, upper_bound
+    best = 1
+    logger.info(f"Auto batch probe: searching [{lo}, {hi}] on {device} (seq_len={max_seq_len})")
+    model.eval()
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        try:
+            dummy_ids = torch.ones(mid, max_seq_len, dtype=torch.long, device=device)
+            dummy_mask = torch.ones(mid, max_seq_len, dtype=torch.long, device=device)
+            with torch.no_grad():
+                model(input_ids=dummy_ids, attention_mask=dummy_mask, use_cache=False)
+            best = mid
+            lo = mid + 1
+            logger.info(f"  bs={mid} OK (best={best})")
+        except torch.cuda.OutOfMemoryError:
+            hi = mid - 1
+            logger.info(f"  bs={mid} OOM (shrink to {hi})")
+        finally:
+            torch.cuda.empty_cache()
+    safe_bs = max(1, int(best * safety_margin))
+    logger.info(f"Auto batch probe done: max={best}, safe={safe_bs}")
+    return safe_bs
+
+
 def main():
     parser = argparse.ArgumentParser(description="Stage 1 Upper Bound: Qwen3 Direct NTP")
     parser.add_argument("--config", type=str, default="config/default.yaml")
     parser.add_argument("--model_path", type=str, default=None,
                         help="Override qwen3_model_path from config")
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=0,
+                        help="Batch size (0 = auto-detect)")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--output", type=str, default="./outputs/benchmark/stage1_upper_bound.json")
     args = parser.parse_args()
@@ -158,12 +185,21 @@ def main():
     model = model.to(device)
     logger.info(f"Device: {device}")
 
+    # Auto batch size
+    batch_size = args.batch_size
+    if batch_size <= 0 and device.type == "cuda":
+        max_seq_len = config.stage1_max_context_len + config.stage1_max_cont_len
+        batch_size = _probe_max_batch_size(model, max_seq_len, device)
+    elif batch_size <= 0:
+        batch_size = 4
+    logger.info(f"Using batch_size={batch_size}")
+
     dataset = DirectNTPDataset(eval_path, tokenizer, config.stage1_max_context_len, config.stage1_max_cont_len)
     if args.max_samples and len(dataset) > args.max_samples:
         dataset = torch.utils.data.Subset(dataset, range(args.max_samples))
     logger.info(f"Eval samples: {len(dataset)}")
 
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=4)
 
     results = evaluate_direct_ntp(model, dataloader, device)
 

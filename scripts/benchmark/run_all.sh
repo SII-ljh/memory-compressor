@@ -90,7 +90,6 @@ if [[ "${STAGE}" == "all" || "${STAGE}" == "1" ]]; then
         python scripts/benchmark/stage1_upper_bound.py \
             --config "${CONFIG}" \
             --model_path "${MODEL_PATH}" \
-            --batch_size 4 \
             --output "${OUT_FILE}"
         echo ""
     done
@@ -116,8 +115,6 @@ if [[ "${STAGE}" == "all" || "${STAGE}" == "2" ]]; then
                 --model_path "${MODEL_PATH}" \
                 --epochs 1 \
                 --lr 2e-4 \
-                --batch_size 4 \
-                --grad_accum 8 \
                 --lora_rank 32 \
                 --eval_interval 100 \
                 --output_dir "${FT_OUTPUT}"
@@ -132,7 +129,6 @@ if [[ "${STAGE}" == "all" || "${STAGE}" == "2" ]]; then
             --model_path "${MODEL_PATH}" \
             --lora_path "${LORA_PATH}" \
             --mode both \
-            --batch_size 4 \
             --output "${EVAL_OUTPUT}"
         echo "    Saved: ${EVAL_OUTPUT}"
         echo ""
