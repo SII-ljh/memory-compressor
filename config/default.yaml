@@ -26,16 +26,30 @@ init_scale: 0.02
 qwen3_model_path: ./models/Qwen3-0.6B
 vocab_size: 151936
 
-# --- Training: Stage 1 (pretrain) ---
+# --- Training: Stage 1 shared ---
 stage1_lr: 1.0e-4
 stage1_batch_size: 8
-stage1_max_epochs: 3
-stage1_max_context_len: 4096
-stage1_max_cont_len: 256
 stage1_warmup_ratio: 0.05
 stage1_weight_decay: 0.01
 stage1_grad_clip: 1.0
 stage1_gradient_accumulation_steps: 4
+
+# Stage 1 legacy (kept for upper-bound benchmark)
+stage1_max_context_len: 4096
+stage1_max_cont_len: 256
+stage1_max_epochs: 3
+
+# --- Training: Stage 1a (short window warmup) ---
+stage1a_max_context_len: 512
+stage1a_max_cont_len: 128
+stage1a_max_epochs: 3
+stage1a_warmup_tokens: 100000000  # 100M tokens
+
+# --- Training: Stage 1b (long window multi-chunk) ---
+stage1b_num_chunks: 4
+stage1b_chunk_len: 512
+stage1b_max_cont_len: 128
+stage1b_max_epochs: 3
 
 # --- Training: Stage 2 (QA finetune) ---
 stage2_lr: 5.0e-5
@@ -56,6 +70,8 @@ fsdp_sharding_strategy: FULL_SHARD
 # --- Data ---
 pretrain_data_path: ./data/stage1/train.jsonl
 pretrain_eval_data_path: ./data/stage1/eval.jsonl
+stage1a_train_data_path: ./data/stage1/warmup_train.jsonl
+stage1b_train_data_path: ./data/stage1/multichunk_train.jsonl
 sft_train_data_path: ./data/stage2/train.json
 sft_eval_data_path: ./data/stage2/eval.json
 

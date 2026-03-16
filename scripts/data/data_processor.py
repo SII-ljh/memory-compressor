@@ -414,19 +414,30 @@ RULER_CONFIGS = [
 ]
 
 
-def process_pretrain(input_dir: Path, output_dir: Path, force: bool = False,
-                     eval_size: int = 500):
-    """处理预训练数据: 从 fineweb 末尾切出 eval 集, 剩余为 train 集.
+def _estimate_tokens(text: str) -> int:
+    """粗估 token 数: 词数 × 1.3 (与 data_downloader 一致)."""
+    return int(len(text.split()) * 1.3)
 
-    eval 集同时用于:
-      - Stage 1 训练期间的 eval step
-      - Stage 1 上界评估 (Qwen3 直接 NTP)
+
+def process_pretrain(input_dir: Path, output_dir: Path, force: bool = False,
+                     eval_size: int = 500,
+                     warmup_tokens: int = 100_000_000,
+                     multichunk_min_chars: int = 9000):
+    """处理预训练数据: 切分为 warmup / multichunk / eval 三份.
+
+    Stage 1a (warmup):     前 ~warmup_tokens 个 token 的文档 → warmup_train.jsonl
+    Stage 1b (multichunk): 剩余文档中长度 >= multichunk_min_chars 的 → multichunk_train.jsonl
+    eval:                  末尾 eval_size 条 → eval.jsonl (两阶段共用)
+
+    同时保留 train.jsonl (全量训练集) 以兼容上界评估.
     """
     stage1_out = ensure_dir(output_dir / "stage1")
     train_path = stage1_out / "train.jsonl"
     eval_path = stage1_out / "eval.jsonl"
+    warmup_path = stage1_out / "warmup_train.jsonl"
+    multichunk_path = stage1_out / "multichunk_train.jsonl"
 
-    if not force and train_path.exists() and eval_path.exists():
+    if not force and warmup_path.exists() and multichunk_path.exists() and eval_path.exists():
         print(f"  [Skip] Stage 1 数据已存在 (使用 --force 覆盖)")
         return
 
@@ -436,8 +447,10 @@ def process_pretrain(input_dir: Path, output_dir: Path, force: bool = False,
         print(f"          请先运行: python scripts/data/data_downloader.py --task pretrain")
         return
 
-    print(f"\n  [Pretrain] 切分预训练数据 (eval_size={eval_size})")
+    print(f"\n  [Pretrain] 切分预训练数据 (eval_size={eval_size}, "
+          f"warmup_tokens={warmup_tokens:,}, multichunk_min_chars={multichunk_min_chars})")
 
+    # 读取所有行
     lines = []
     with open(src, "r", encoding="utf-8") as f:
         for line in f:
@@ -449,16 +462,56 @@ def process_pretrain(input_dir: Path, output_dir: Path, force: bool = False,
         print(f"  [Error] 数据量太少 ({total} 行), 无法切出 {eval_size} 条 eval")
         return
 
+    # 末尾切出 eval
     train_lines = lines[:-eval_size]
     eval_lines = lines[-eval_size:]
 
+    # 保留 train.jsonl (兼容上界评估脚本)
     with open(train_path, "w", encoding="utf-8") as f:
         f.writelines(train_lines)
     with open(eval_path, "w", encoding="utf-8") as f:
         f.writelines(eval_lines)
 
-    print(f"  [Stage 1 Done] train: {len(train_lines)} samples → {train_path}")
-    print(f"                 eval:  {len(eval_lines)} samples → {eval_path}")
+    # 按累计 token 数切分 warmup / multichunk
+    warmup_lines = []
+    multichunk_lines = []
+    cumulative_tokens = 0
+    warmup_done = False
+    short_skipped = 0
+
+    for line in train_lines:
+        try:
+            record = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
+
+        text = record.get("text", "")
+        est_tokens = _estimate_tokens(text)
+
+        if not warmup_done:
+            warmup_lines.append(line)
+            cumulative_tokens += est_tokens
+            if cumulative_tokens >= warmup_tokens:
+                warmup_done = True
+        else:
+            # multichunk: 只保留足够长的文档 (≥ 2176 tokens ≈ multichunk_min_chars chars)
+            if len(text) >= multichunk_min_chars:
+                multichunk_lines.append(line)
+            else:
+                short_skipped += 1
+
+    with open(warmup_path, "w", encoding="utf-8") as f:
+        f.writelines(warmup_lines)
+    with open(multichunk_path, "w", encoding="utf-8") as f:
+        f.writelines(multichunk_lines)
+
+    print(f"  [Stage 1 Done]")
+    print(f"    train (legacy):  {len(train_lines)} samples → {train_path}")
+    print(f"    warmup (1a):     {len(warmup_lines)} samples (~{cumulative_tokens:,} tokens) → {warmup_path}")
+    print(f"    multichunk (1b): {len(multichunk_lines)} samples → {multichunk_path}")
+    if short_skipped:
+        print(f"    (跳过 {short_skipped} 条短文档 < {multichunk_min_chars} chars)")
+    print(f"    eval:            {len(eval_lines)} samples → {eval_path}")
 
 
 def process_sft(input_dir: Path, output_dir: Path, force: bool = False, seed: int = 42):

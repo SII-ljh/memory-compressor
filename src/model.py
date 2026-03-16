@@ -37,8 +37,10 @@ class QCPC(nn.Module):
 
     def forward(
         self,
-        context_ids: torch.LongTensor,
+        context_ids: torch.LongTensor | None = None,
         context_mask: torch.Tensor | None = None,
+        chunk_ids: torch.LongTensor | None = None,
+        chunk_mask: torch.Tensor | None = None,
         prompt_ids: torch.LongTensor | None = None,
         prompt_mask: torch.Tensor | None = None,
         target_ids: torch.LongTensor | None = None,
@@ -46,9 +48,15 @@ class QCPC(nn.Module):
     ) -> dict:
         """Full forward pass.
 
+        Dispatches to single-chunk or multi-chunk path based on input:
+        - If chunk_ids is provided: multi-chunk path (Stage 1b)
+        - Otherwise: single-chunk path (Stage 1a / Stage 2)
+
         Args:
-            context_ids: (B, N) long context token IDs
+            context_ids: (B, N) long context token IDs (single-chunk)
             context_mask: (B, N) attention mask (1=valid, 0=pad)
+            chunk_ids: (B, K, N) multi-chunk token IDs (multi-chunk)
+            chunk_mask: (B, K, N) multi-chunk attention masks
             prompt_ids: (B, L) prompt/question token IDs (optional)
             prompt_mask: (B, L) prompt mask
             target_ids: (B, T) target token IDs for loss (optional, training only)
@@ -57,6 +65,12 @@ class QCPC(nn.Module):
         Returns:
             dict with 'loss' (if training), 'logits', 'memory_tokens'
         """
+        if chunk_ids is not None:
+            return self._forward_multi_chunk(
+                chunk_ids, chunk_mask, target_ids, target_mask
+            )
+
+        # --- Single-chunk path ---
         # 1. Embed context
         context_embeds = self.embedding(context_ids)  # (B, N, D)
 
@@ -80,6 +94,53 @@ class QCPC(nn.Module):
             prompt_embeds=None,  # use IDs for decoder prompt
             target_ids=target_ids,
             prompt_mask=prompt_mask,
+            target_mask=target_mask,
+        )
+
+        decoder_result["memory_tokens"] = memory_tokens
+        return decoder_result
+
+    def _forward_multi_chunk(
+        self,
+        chunk_ids: torch.LongTensor,
+        chunk_mask: torch.Tensor | None,
+        target_ids: torch.LongTensor | None,
+        target_mask: torch.Tensor | None,
+    ) -> dict:
+        """Multi-chunk forward: compress K chunks in parallel, concatenate memory.
+
+        Args:
+            chunk_ids: (B, K, N) token IDs for K chunks
+            chunk_mask: (B, K, N) attention masks
+            target_ids: (B, T) continuation target
+            target_mask: (B, T) target mask
+
+        Returns:
+            dict with 'loss' (if training), 'logits', 'memory_tokens'
+        """
+        B, K, N = chunk_ids.shape
+        M = self.config.num_memory_tokens
+
+        # Flatten K chunks into batch dimension: (B*K, N)
+        flat_ids = chunk_ids.reshape(B * K, N)
+        flat_mask = chunk_mask.reshape(B * K, N) if chunk_mask is not None else None
+
+        # Embed all chunks
+        flat_embeds = self.embedding(flat_ids)  # (B*K, N, D)
+
+        # Compress each chunk independently through Perceiver
+        flat_memory = self.perceiver(
+            text_embeds=flat_embeds,
+            text_mask=flat_mask,
+        )  # (B*K, M, D)
+
+        # Reshape: concatenate K sets of M memory tokens per sample → (B, K*M, D)
+        memory_tokens = flat_memory.reshape(B, K * M, -1)
+
+        # Decode: [<MEM>, memory_1..memory_{K*M}, </MEM>, target]
+        decoder_result = self.decoder(
+            memory_tokens=memory_tokens,
+            target_ids=target_ids,
             target_mask=target_mask,
         )
 

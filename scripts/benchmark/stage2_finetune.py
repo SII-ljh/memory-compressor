@@ -24,6 +24,10 @@ import os
 import sys
 from pathlib import Path
 
+# Must be set before any CUDA operations to avoid memory fragmentation
+# during auto batch probing (repeated OOM/free cycles fragment the allocator)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
@@ -112,6 +116,7 @@ def _probe_max_batch_size(model, optimizer, max_seq_len, device,
     while lo <= hi:
         mid = (lo + hi) // 2
         dummy = None
+        outputs = None
         try:
             dummy = {
                 "input_ids": torch.ones(mid, max_seq_len, dtype=torch.long, device=device),
@@ -130,7 +135,7 @@ def _probe_max_batch_size(model, optimizer, max_seq_len, device,
             hi = mid - 1
             logger.info(f"  bs={mid} OOM (shrink to {hi})")
         finally:
-            del dummy
+            del dummy, outputs
             gc.collect()
             torch.cuda.empty_cache()
 

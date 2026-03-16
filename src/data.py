@@ -67,6 +67,70 @@ class PretrainDataset(Dataset):
         }
 
 
+class PretrainMultiChunkDataset(Dataset):
+    """Stage 1b: Multi-chunk concatenation training dataset.
+
+    Each sample consists of K consecutive chunks compressed independently,
+    whose memory tokens are concatenated and fed to the decoder to predict
+    a continuation target.
+
+    Total tokens per sample: K * chunk_len + cont_len  (e.g. 4*512+128 = 2176).
+    """
+
+    def __init__(
+        self,
+        data_path: str,
+        tokenizer: AutoTokenizer,
+        num_chunks: int = 4,
+        chunk_len: int = 512,
+        cont_len: int = 128,
+    ):
+        self.tokenizer = tokenizer
+        self.num_chunks = num_chunks
+        self.chunk_len = chunk_len
+        self.cont_len = cont_len
+        self.total_len = num_chunks * chunk_len + cont_len
+
+        self.records = []
+        with open(data_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        self.records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, idx):
+        text = self.records[idx]["text"]
+        tokens = self.tokenizer.encode(text, add_special_tokens=False)
+
+        # Truncate or pad to exact total_len
+        if len(tokens) >= self.total_len:
+            tokens = tokens[:self.total_len]
+        else:
+            pad_id = self.tokenizer.pad_token_id or 0
+            tokens = tokens + [pad_id] * (self.total_len - len(tokens))
+
+        # Split: K chunks of chunk_len + cont_len target
+        chunk_ids = []
+        for i in range(self.num_chunks):
+            start = i * self.chunk_len
+            end = start + self.chunk_len
+            chunk_ids.append(tokens[start:end])
+
+        target_start = self.num_chunks * self.chunk_len
+        target_ids = tokens[target_start:target_start + self.cont_len]
+
+        return {
+            "chunk_ids": chunk_ids,   # list of K lists, each chunk_len
+            "target_ids": target_ids,  # list of cont_len
+        }
+
+
 class QADataset(Dataset):
     """Stage 2: QA finetuning dataset.
 
@@ -137,6 +201,32 @@ def collate_fn(batch: list[dict]) -> dict:
     return result
 
 
+def collate_multi_chunk_fn(batch: list[dict]) -> dict:
+    """Collate for PretrainMultiChunkDataset.
+
+    All chunks are fixed-size (chunk_len) and targets are fixed-size (cont_len),
+    so we simply stack into tensors without padding.
+    """
+    # chunk_ids: (B, K, chunk_len)
+    chunk_ids = torch.tensor(
+        [item["chunk_ids"] for item in batch], dtype=torch.long
+    )
+    chunk_mask = torch.ones_like(chunk_ids)
+
+    # target_ids: (B, cont_len)
+    target_ids = torch.tensor(
+        [item["target_ids"] for item in batch], dtype=torch.long
+    )
+    target_mask = torch.ones_like(target_ids)
+
+    return {
+        "chunk_ids": chunk_ids,
+        "chunk_mask": chunk_mask,
+        "target_ids": target_ids,
+        "target_mask": target_mask,
+    }
+
+
 def create_pretrain_dataloader(
     data_path: str,
     tokenizer: AutoTokenizer,
@@ -157,6 +247,36 @@ def create_pretrain_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=collate_fn,
+        pin_memory=True,
+        drop_last=drop_last,
+    )
+
+
+def create_multi_chunk_dataloader(
+    data_path: str,
+    tokenizer: AutoTokenizer,
+    batch_size: int,
+    num_chunks: int = 4,
+    chunk_len: int = 512,
+    cont_len: int = 128,
+    num_workers: int = 4,
+    shuffle: bool = True,
+    max_samples: int | None = None,
+    drop_last: bool = True,
+) -> DataLoader:
+    dataset = PretrainMultiChunkDataset(
+        data_path, tokenizer, num_chunks, chunk_len, cont_len
+    )
+    if max_samples is not None and len(dataset) > max_samples:
+        dataset = torch.utils.data.Subset(
+            dataset, range(len(dataset) - max_samples, len(dataset))
+        )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=collate_multi_chunk_fn,
         pin_memory=True,
         drop_last=drop_last,
     )

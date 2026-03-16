@@ -40,16 +40,30 @@ class QCPCConfig:
     qwen3_model_path: str = "./models/Qwen3-0.6B"
     vocab_size: int = 151936
 
-    # --- Training: Stage 1 (pretrain) ---
+    # --- Training: Stage 1 shared ---
     stage1_lr: float = 1e-4
     stage1_batch_size: int = 8
-    stage1_max_epochs: int = 3
-    stage1_max_context_len: int = 4096   # N: input context length
-    stage1_max_cont_len: int = 256       # continuation length for NTP
     stage1_warmup_ratio: float = 0.05
     stage1_weight_decay: float = 0.01
     stage1_grad_clip: float = 1.0
     stage1_gradient_accumulation_steps: int = 4
+
+    # Stage 1 legacy (kept for upper-bound benchmark compatibility)
+    stage1_max_context_len: int = 4096   # N: used by stage1_upper_bound.py
+    stage1_max_cont_len: int = 256       # used by stage1_upper_bound.py
+    stage1_max_epochs: int = 3           # legacy, see stage1a/1b below
+
+    # --- Training: Stage 1a (short window warmup — single-chunk compression) ---
+    stage1a_max_context_len: int = 512   # single chunk length
+    stage1a_max_cont_len: int = 128      # continuation target length
+    stage1a_max_epochs: int = 3
+    stage1a_warmup_tokens: int = 100_000_000  # first ~100M tokens for warmup
+
+    # --- Training: Stage 1b (long window — multi-chunk concatenation) ---
+    stage1b_num_chunks: int = 4          # K: number of chunks
+    stage1b_chunk_len: int = 512         # N per chunk
+    stage1b_max_cont_len: int = 128      # continuation target length
+    stage1b_max_epochs: int = 3
 
     # --- Training: Stage 2 (QA finetune) ---
     stage2_lr: float = 5e-5
@@ -68,8 +82,10 @@ class QCPCConfig:
     fsdp_sharding_strategy: str = "FULL_SHARD"
 
     # --- Data ---
-    pretrain_data_path: str = "./data/stage1/train.jsonl"
-    pretrain_eval_data_path: str = "./data/stage1/eval.jsonl"
+    pretrain_data_path: str = "./data/stage1/train.jsonl"           # legacy
+    pretrain_eval_data_path: str = "./data/stage1/eval.jsonl"       # shared eval
+    stage1a_train_data_path: str = "./data/stage1/warmup_train.jsonl"
+    stage1b_train_data_path: str = "./data/stage1/multichunk_train.jsonl"
     sft_train_data_path: str = "./data/stage2/train.json"
     sft_eval_data_path: str = "./data/stage2/eval.json"
 

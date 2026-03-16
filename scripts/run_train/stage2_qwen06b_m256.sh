@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stage 2: QA finetune for Qwen3-0.6B M=256
-# Auto-detects stage1 checkpoint from output_dir/stage1/
+# Auto-detects stage1 checkpoint from output_dir (searches stage1b/ → stage1a/ → stage1/)
 set -euo pipefail
 
 NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l | xargs)}

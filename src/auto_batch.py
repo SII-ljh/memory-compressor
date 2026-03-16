@@ -5,8 +5,13 @@ then computes gradient_accumulation_steps so that
     effective_batch_size = per_gpu_bs * num_gpus * accum_steps >= target_ebs.
 """
 
+import gc
 import logging
 import math
+import os
+
+# Avoid CUDA memory fragmentation from repeated OOM/free during probing
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torch.nn as nn
@@ -16,47 +21,69 @@ from .config import QCPCConfig
 logger = logging.getLogger(__name__)
 
 
-def _make_dummy_batch(batch_size: int, config: QCPCConfig, stage: int, device: torch.device) -> dict:
-    """Create a worst-case dummy batch (max sequence lengths) for OOM probing."""
-    ctx_len = config.stage1_max_context_len if stage == 1 else config.stage2_max_context_len
+def _make_dummy_batch(batch_size: int, config: QCPCConfig, stage: str, device: torch.device) -> dict:
+    """Create a worst-case dummy batch (max sequence lengths) for OOM probing.
+
+    Args:
+        stage: "1a" (warmup), "1b" (multi-chunk), or "2" (QA finetune).
+    """
     # Use token ID 1 (not 0 which is often pad) to avoid any special-case shortcuts
-    batch = {
-        "context_ids": torch.ones(batch_size, ctx_len, dtype=torch.long, device=device),
-        "context_mask": torch.ones(batch_size, ctx_len, dtype=torch.long, device=device),
-    }
-    if stage == 1:
-        tgt_len = config.stage1_max_cont_len
-        batch["target_ids"] = torch.ones(batch_size, tgt_len, dtype=torch.long, device=device)
-        batch["target_mask"] = torch.ones(batch_size, tgt_len, dtype=torch.long, device=device)
-    else:
+    if stage == "1a":
+        ctx_len = config.stage1a_max_context_len
+        tgt_len = config.stage1a_max_cont_len
+        batch = {
+            "context_ids": torch.ones(batch_size, ctx_len, dtype=torch.long, device=device),
+            "context_mask": torch.ones(batch_size, ctx_len, dtype=torch.long, device=device),
+            "target_ids": torch.ones(batch_size, tgt_len, dtype=torch.long, device=device),
+            "target_mask": torch.ones(batch_size, tgt_len, dtype=torch.long, device=device),
+        }
+    elif stage == "1b":
+        K = config.stage1b_num_chunks
+        N = config.stage1b_chunk_len
+        tgt_len = config.stage1b_max_cont_len
+        batch = {
+            "chunk_ids": torch.ones(batch_size, K, N, dtype=torch.long, device=device),
+            "chunk_mask": torch.ones(batch_size, K, N, dtype=torch.long, device=device),
+            "target_ids": torch.ones(batch_size, tgt_len, dtype=torch.long, device=device),
+            "target_mask": torch.ones(batch_size, tgt_len, dtype=torch.long, device=device),
+        }
+    else:  # stage == "2"
+        ctx_len = config.stage2_max_context_len
         prompt_len = config.stage2_max_prompt_len
         ans_len = config.stage2_max_answer_len
-        batch["prompt_ids"] = torch.ones(batch_size, prompt_len, dtype=torch.long, device=device)
-        batch["prompt_mask"] = torch.ones(batch_size, prompt_len, dtype=torch.long, device=device)
-        batch["target_ids"] = torch.ones(batch_size, ans_len, dtype=torch.long, device=device)
-        batch["target_mask"] = torch.ones(batch_size, ans_len, dtype=torch.long, device=device)
+        batch = {
+            "context_ids": torch.ones(batch_size, ctx_len, dtype=torch.long, device=device),
+            "context_mask": torch.ones(batch_size, ctx_len, dtype=torch.long, device=device),
+            "prompt_ids": torch.ones(batch_size, prompt_len, dtype=torch.long, device=device),
+            "prompt_mask": torch.ones(batch_size, prompt_len, dtype=torch.long, device=device),
+            "target_ids": torch.ones(batch_size, ans_len, dtype=torch.long, device=device),
+            "target_mask": torch.ones(batch_size, ans_len, dtype=torch.long, device=device),
+        }
     return batch
 
 
 def _try_batch(model: nn.Module, batch: dict) -> bool:
     """Try a forward + backward pass; return True if it fits in memory."""
+    result = None
     try:
         result = model(**batch)
         loss = result["loss"]
         loss.backward()
         model.zero_grad(set_to_none=True)
-        torch.cuda.empty_cache()
         return True
     except torch.cuda.OutOfMemoryError:
         model.zero_grad(set_to_none=True)
-        torch.cuda.empty_cache()
         return False
+    finally:
+        del result
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 def find_max_batch_size(
     model: nn.Module,
     config: QCPCConfig,
-    stage: int,
+    stage: str,
     device: torch.device,
 ) -> int:
     """Binary search for max per-GPU batch size that fits in VRAM.
@@ -84,8 +111,9 @@ def find_max_batch_size(
         else:
             hi = mid - 1
             logger.info(f"    OOM (shrinking upper bound to {hi})")
-        # Clean up tensors
         del batch
+        gc.collect()
+        torch.cuda.empty_cache()
 
     safe_bs = max(1, int(best * config.auto_batch_safety_margin))
     logger.info(f"Auto batch probe done: max={best}, safe={safe_bs} "

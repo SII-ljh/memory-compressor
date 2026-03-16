@@ -95,17 +95,30 @@ def test_compute_accum_invalid_inputs():
 
 # --- _make_dummy_batch shape tests ---
 
-def test_dummy_batch_stage1_shapes():
-    """Dummy batch for stage 1 has correct shapes."""
-    config = _make_config(stage1_max_context_len=64, stage1_max_cont_len=16)
-    batch = _make_dummy_batch(4, config, stage=1, device=torch.device("cpu"))
+def test_dummy_batch_stage1a_shapes():
+    """Dummy batch for stage 1a has correct shapes."""
+    config = _make_config(stage1a_max_context_len=64, stage1a_max_cont_len=16)
+    batch = _make_dummy_batch(4, config, stage="1a", device=torch.device("cpu"))
 
     assert batch["context_ids"].shape == (4, 64), f"Got {batch['context_ids'].shape}"
     assert batch["context_mask"].shape == (4, 64)
     assert batch["target_ids"].shape == (4, 16), f"Got {batch['target_ids'].shape}"
     assert batch["target_mask"].shape == (4, 16)
     assert "prompt_ids" not in batch
-    print(f"[PASS] test_dummy_batch_stage1_shapes")
+    print(f"[PASS] test_dummy_batch_stage1a_shapes")
+
+
+def test_dummy_batch_stage1b_shapes():
+    """Dummy batch for stage 1b (multi-chunk) has correct shapes."""
+    config = _make_config(stage1b_num_chunks=4, stage1b_chunk_len=32, stage1b_max_cont_len=8)
+    batch = _make_dummy_batch(2, config, stage="1b", device=torch.device("cpu"))
+
+    assert batch["chunk_ids"].shape == (2, 4, 32), f"Got {batch['chunk_ids'].shape}"
+    assert batch["chunk_mask"].shape == (2, 4, 32)
+    assert batch["target_ids"].shape == (2, 8), f"Got {batch['target_ids'].shape}"
+    assert batch["target_mask"].shape == (2, 8)
+    assert "context_ids" not in batch
+    print(f"[PASS] test_dummy_batch_stage1b_shapes")
 
 
 def test_dummy_batch_stage2_shapes():
@@ -115,7 +128,7 @@ def test_dummy_batch_stage2_shapes():
         stage2_max_prompt_len=16,
         stage2_max_answer_len=32,
     )
-    batch = _make_dummy_batch(2, config, stage=2, device=torch.device("cpu"))
+    batch = _make_dummy_batch(2, config, stage="2", device=torch.device("cpu"))
 
     assert batch["context_ids"].shape == (2, 64)
     assert batch["context_mask"].shape == (2, 64)
@@ -129,7 +142,7 @@ def test_dummy_batch_stage2_shapes():
 def test_dummy_batch_values():
     """Dummy batch should use token ID 1 (not 0) and all-ones masks."""
     config = _make_config()
-    batch = _make_dummy_batch(1, config, stage=1, device=torch.device("cpu"))
+    batch = _make_dummy_batch(1, config, stage="1a", device=torch.device("cpu"))
 
     assert (batch["context_ids"] == 1).all(), "context_ids should all be 1"
     assert (batch["context_mask"] == 1).all(), "context_mask should all be 1"
@@ -147,7 +160,8 @@ if __name__ == "__main__":
     test_compute_accum_invalid_inputs()
 
     # Dummy batch shape tests (CPU only)
-    test_dummy_batch_stage1_shapes()
+    test_dummy_batch_stage1a_shapes()
+    test_dummy_batch_stage1b_shapes()
     test_dummy_batch_stage2_shapes()
     test_dummy_batch_values()
 
