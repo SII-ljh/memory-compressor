@@ -273,9 +273,29 @@ def main():
     logger.info(f"LoRA trainable params: {trainable_params:,} / {total_params:,} "
                 f"({trainable_params/total_params*100:.2f}%)")
 
-    # --- Auto batch size probe (rank 0 only, before Accelerator) ---
+    # --- Create datasets early so we can scan actual max sequence length ---
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    train_dataset = QAFineTuneDataset(train_path, tokenizer, args.max_seq_len)
+    dev_dataset = QAFineTuneDataset(dev_path, tokenizer, args.max_seq_len)
+
+    # Scan dataset for actual max sequence length (rank 0 only, others get broadcast)
     rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    if rank == 0:
+        actual_max_len = 0
+        for i in range(len(train_dataset)):
+            actual_max_len = max(actual_max_len, len(train_dataset[i]["input_ids"]))
+        # Round up to multiple of 64 for memory-aligned probe
+        probe_seq_len = min(args.max_seq_len, ((actual_max_len + 63) // 64) * 64)
+        logger.info(f"Dataset actual max_len={actual_max_len}, "
+                    f"probe_seq_len={probe_seq_len} (config max={args.max_seq_len})")
+    else:
+        probe_seq_len = args.max_seq_len  # will be overridden by broadcast
+
+    # --- Auto batch size probe (rank 0 only, before Accelerator) ---
     per_gpu_bs = args.batch_size
 
     if per_gpu_bs <= 0 and torch.cuda.is_available():
@@ -283,7 +303,7 @@ def main():
         if rank == 0:
             model.to(device)
             per_gpu_bs = _probe_max_batch_size(
-                model, args.max_seq_len, device, train_mode=True,
+                model, probe_seq_len, device, train_mode=True,
             )
             model.to("cpu")
             torch.cuda.empty_cache()
@@ -320,14 +340,6 @@ def main():
         logger.info(f"Train data: {train_path}")
         logger.info(f"Dev data:   {dev_path}")
         logger.info(f"Devices: {accelerator.num_processes}")
-
-    # Datasets
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    train_dataset = QAFineTuneDataset(train_path, tokenizer, args.max_seq_len)
-    dev_dataset = QAFineTuneDataset(dev_path, tokenizer, args.max_seq_len)
-    if accelerator.is_main_process:
         logger.info(f"Train samples: {len(train_dataset)}, Dev samples: {len(dev_dataset)}")
 
     train_loader = DataLoader(
