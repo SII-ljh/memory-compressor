@@ -131,6 +131,8 @@ def evaluate_direct_ntp(model, dataloader, device):
 def main():
     parser = argparse.ArgumentParser(description="Stage 1 Upper Bound: Qwen3 Direct NTP")
     parser.add_argument("--config", type=str, default="config/default.yaml")
+    parser.add_argument("--model_path", type=str, default=None,
+                        help="Override qwen3_model_path from config")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--output", type=str, default="./outputs/benchmark/stage1_upper_bound.json")
@@ -138,6 +140,8 @@ def main():
 
     logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
     config = QCPCConfig.load(args.config)
+    if args.model_path:
+        config.qwen3_model_path = args.model_path
 
     eval_path = config.pretrain_eval_data_path
     logger.info(f"Eval data: {eval_path}")
