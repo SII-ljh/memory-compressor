@@ -4,7 +4,10 @@
 # Perceiver: hidden=2560, heads=40, head_dim=64, ffn=5120
 set -euo pipefail
 
-accelerate launch --num_processes 8 --multi_gpu \
+NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l | xargs)}
+[[ ${NUM_GPUS} -lt 1 ]] && NUM_GPUS=1
+
+accelerate launch --num_processes "${NUM_GPUS}" --multi_gpu \
   src/train.py --config config/default.yaml --stage 1 \
   --override \
     use_decoupled_rope=false \
