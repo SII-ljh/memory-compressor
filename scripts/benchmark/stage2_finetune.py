@@ -333,7 +333,7 @@ def main():
     # Create Accelerator
     accelerator = Accelerator(
         gradient_accumulation_steps=accum_steps,
-        mixed_precision="bf16",
+        mixed_precision="no",  # model already bf16; autocast would promote cross_entropy to fp32
     )
 
     if accelerator.is_main_process:
