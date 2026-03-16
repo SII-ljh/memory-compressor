@@ -59,7 +59,7 @@ if [[ "${STAGE}" == "all" || "${STAGE}" == "2" ]]; then
         echo ">>> Stage 2 Fine-tune (LoRA on Qwen3)..."
         python scripts/benchmark/stage2_finetune.py \
             --config "${CONFIG}" \
-            --epochs 3 \
+            --epochs 1 \
             --lr 2e-4 \
             --batch_size 4 \
             --grad_accum 8 \
