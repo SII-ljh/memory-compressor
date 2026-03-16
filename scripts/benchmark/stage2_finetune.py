@@ -53,9 +53,11 @@ logger = logging.getLogger(__name__)
 PROMPT_TEMPLATE = "Context: {context}\n\nQuestion: {question}\n\nAnswer:"
 
 
-def _probe_max_batch_size(model, max_seq_len, device, train_mode=False,
-                          upper_bound=128, safety_margin=0.85):
-    """Binary search for max batch size that fits in GPU memory."""
+def _probe_max_batch_size(model, max_seq_len, device, train_mode=False, upper_bound=256):
+    """Binary search for max batch size that fits in GPU memory.
+
+    Uses max_seq_len as worst-case, so the result is already conservative.
+    """
     lo, hi = 1, upper_bound
     best = 1
     logger.info(f"Auto batch probe: searching [{lo}, {hi}] on {device} "
@@ -98,9 +100,8 @@ def _probe_max_batch_size(model, max_seq_len, device, train_mode=False,
     else:
         model.eval()
 
-    safe_bs = max(1, int(best * safety_margin))
-    logger.info(f"Auto batch probe done: max={best}, safe={safe_bs}")
-    return safe_bs
+    logger.info(f"Auto batch probe done: max_bs={best}")
+    return best
 
 
 class QAFineTuneDataset(Dataset):

@@ -130,8 +130,12 @@ def evaluate_direct_ntp(model, dataloader, device):
     return {"loss": avg_loss, "ppl": ppl, "total_tokens": int(total_tokens)}
 
 
-def _probe_max_batch_size(model, max_seq_len, device, upper_bound=128, safety_margin=0.85):
-    """Binary search for max batch size (inference + loss) that fits in GPU memory."""
+def _probe_max_batch_size(model, max_seq_len, device, upper_bound=256):
+    """Binary search for max batch size (inference + loss) that fits in GPU memory.
+
+    Uses max_seq_len as worst-case sequence length, so the result is already
+    conservative — no additional safety margin needed.
+    """
     lo, hi = 1, upper_bound
     best = 1
     logger.info(f"Auto batch probe: searching [{lo}, {hi}] on {device} (seq_len={max_seq_len})")
@@ -153,9 +157,8 @@ def _probe_max_batch_size(model, max_seq_len, device, upper_bound=128, safety_ma
             logger.info(f"  bs={mid} OOM (shrink to {hi})")
         finally:
             torch.cuda.empty_cache()
-    safe_bs = max(1, int(best * safety_margin))
-    logger.info(f"Auto batch probe done: max={best}, safe={safe_bs}")
-    return safe_bs
+    logger.info(f"Auto batch probe done: max_bs={best}")
+    return best
 
 
 def main():

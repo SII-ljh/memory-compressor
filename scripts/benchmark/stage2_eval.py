@@ -157,6 +157,12 @@ def collate_loss(batch):
 
 @torch.no_grad()
 def evaluate_loss(model, dataloader, device):
+    """Compute NTP loss only on valid (answer) tokens to avoid OOM.
+
+    Instead of passing labels to the model (which computes cross_entropy over
+    the full (B*S, V) logits in float32), we extract logits only at answer
+    positions and compute loss on that much smaller tensor.
+    """
     model.eval()
     total_loss = 0.0
     total_tokens = 0
@@ -164,11 +170,38 @@ def evaluate_loss(model, dataloader, device):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         labels = batch["labels"].to(device)
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-        valid_mask = labels != -100
+
+        # Forward WITHOUT labels — avoids the huge internal cross_entropy
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        logits = outputs.logits  # (B, S, V) bfloat16
+
+        # Causal LM shift
+        shift_logits = logits[:, :-1, :]
+        shift_labels = labels[:, 1:]
+
+        # Select only valid (answer) token positions
+        valid_mask = shift_labels != -100
         n_tokens = valid_mask.sum().item()
-        total_loss += outputs.loss.item() * n_tokens
+        if n_tokens == 0:
+            del logits, outputs
+            continue
+
+        valid_logits = shift_logits[valid_mask]   # (N_valid, V)
+        valid_labels = shift_labels[valid_mask]    # (N_valid,)
+
+        # Free large tensors before the float32 cross_entropy
+        del logits, shift_logits, outputs
+
+        loss = nn.functional.cross_entropy(
+            valid_logits.float(), valid_labels, reduction="sum",
+        )
+        total_loss += loss.item()
         total_tokens += n_tokens
+
+        del valid_logits, valid_labels, loss
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
     avg_loss = total_loss / max(total_tokens, 1)
     ppl = math.exp(min(avg_loss, 20))
     return avg_loss, ppl
@@ -214,7 +247,7 @@ def evaluate_generation(model, records, tokenizer, device, with_context, max_seq
     }
 
 
-def _probe_max_batch_size(model, max_seq_len, device, upper_bound=128, safety_margin=0.85):
+def _probe_max_batch_size(model, max_seq_len, device, upper_bound=256):
     """Binary search for max batch size (inference) that fits in GPU memory."""
     lo, hi = 1, upper_bound
     best = 1
@@ -238,9 +271,10 @@ def _probe_max_batch_size(model, max_seq_len, device, upper_bound=128, safety_ma
             logger.info(f"  bs={mid} OOM (shrink to {hi})")
         finally:
             torch.cuda.empty_cache()
-    safe_bs = max(1, int(best * safety_margin))
-    logger.info(f"Auto batch probe done: max={best}, safe={safe_bs}")
-    return safe_bs
+    torch.cuda.empty_cache()
+    safe = max(1, int(best * 0.8))
+    logger.info(f"Auto batch probe done: max={best}, safe={safe}")
+    return safe
 
 
 def run_one_mode(model, tokenizer, records, device, with_context, max_seq_len, batch_size, max_new_tokens):
