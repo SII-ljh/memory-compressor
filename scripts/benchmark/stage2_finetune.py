@@ -163,6 +163,8 @@ def evaluate(model, dataloader, device):
 def main():
     parser = argparse.ArgumentParser(description="Stage 2 Upper Bound: LoRA Fine-tune Qwen3")
     parser.add_argument("--config", type=str, default="config/default.yaml")
+    parser.add_argument("--model_path", type=str, default=None,
+                        help="Override qwen3_model_path from config")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--batch_size", type=int, default=4)
@@ -188,6 +190,8 @@ def main():
 
     torch.manual_seed(args.seed)
     config = QCPCConfig.load(args.config)
+    if args.model_path:
+        config.qwen3_model_path = args.model_path
 
     train_path = config.sft_train_data_path
     dev_path = config.sft_eval_data_path

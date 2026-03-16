@@ -334,6 +334,16 @@ def train_stage1(config: QCPCConfig, resume_path: str | None = None):
         start_epoch = ckpt.get("epoch", 0)
         global_step = ckpt.get("global_step", 0)
 
+        # Fast-forward scheduler to match restored global_step
+        # so the LR curve continues seamlessly (works for both
+        # exact resume and extended max_epochs)
+        if global_step > 0:
+            for _ in range(global_step):
+                scheduler.step()
+            if accelerator.is_main_process:
+                lr = optimizer.param_groups[0]["lr"]
+                logger.info(f"Resumed scheduler to step {global_step}, lr={lr:.2e}")
+
     # Output dir
     output_dir = Path(config.output_dir) / "stage1"
     output_dir.mkdir(parents=True, exist_ok=True)

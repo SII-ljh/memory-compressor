@@ -231,6 +231,8 @@ def run_one_mode(model, tokenizer, records, device, with_context, max_seq_len, b
 def main():
     parser = argparse.ArgumentParser(description="Stage 2 Eval: Upper & Lower Bounds")
     parser.add_argument("--config", type=str, default="config/default.yaml")
+    parser.add_argument("--model_path", type=str, default=None,
+                        help="Override qwen3_model_path from config")
     parser.add_argument("--lora_path", type=str, required=True)
     parser.add_argument("--mode", choices=["both", "upper", "lower"], default="both")
     parser.add_argument("--batch_size", type=int, default=4)
@@ -241,6 +243,8 @@ def main():
 
     logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
     config = QCPCConfig.load(args.config)
+    if args.model_path:
+        config.qwen3_model_path = args.model_path
 
     eval_path = config.sft_eval_data_path
     if not Path(eval_path).exists():
