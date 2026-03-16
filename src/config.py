@@ -60,7 +60,8 @@ class QCPCConfig:
     stage1a_warmup_tokens: int = 100_000_000  # first ~100M tokens for warmup
 
     # --- Training: Stage 1b (long window — multi-chunk concatenation) ---
-    stage1b_num_chunks: int = 4          # K: number of chunks
+    stage1b_max_chunks: int = 8          # K_max: maximum number of chunks per sample
+    stage1b_min_chunks: int = 2          # K_min: minimum (2 suffices for cross-chunk)
     stage1b_chunk_len: int = 512         # N per chunk
     stage1b_max_cont_len: int = 128      # continuation target length
     stage1b_max_epochs: int = 3

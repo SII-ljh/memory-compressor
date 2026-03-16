@@ -46,7 +46,8 @@ stage1a_max_epochs: 3
 stage1a_warmup_tokens: 100000000  # 100M tokens
 
 # --- Training: Stage 1b (long window multi-chunk) ---
-stage1b_num_chunks: 4
+stage1b_max_chunks: 8    # K_max: dynamic per document
+stage1b_min_chunks: 2    # K_min: at least 2 for cross-chunk learning
 stage1b_chunk_len: 512
 stage1b_max_cont_len: 128
 stage1b_max_epochs: 3

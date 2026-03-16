@@ -38,7 +38,7 @@ def _make_dummy_batch(batch_size: int, config: QCPCConfig, stage: str, device: t
             "target_mask": torch.ones(batch_size, tgt_len, dtype=torch.long, device=device),
         }
     elif stage == "1b":
-        K = config.stage1b_num_chunks
+        K = config.stage1b_max_chunks  # worst case for OOM probing
         N = config.stage1b_chunk_len
         tgt_len = config.stage1b_max_cont_len
         batch = {

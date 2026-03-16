@@ -109,9 +109,12 @@ class QCPC(nn.Module):
     ) -> dict:
         """Multi-chunk forward: compress K chunks in parallel, concatenate memory.
 
+        K may vary per sample in a batch (padded chunks have all-zero masks).
+        Memory tokens from padded chunks are masked out in the decoder.
+
         Args:
-            chunk_ids: (B, K, N) token IDs for K chunks
-            chunk_mask: (B, K, N) attention masks
+            chunk_ids: (B, K, N) token IDs for K chunks (K = max in batch)
+            chunk_mask: (B, K, N) attention masks (0 for padded chunks)
             target_ids: (B, T) continuation target
             target_mask: (B, T) target mask
 
@@ -137,9 +140,16 @@ class QCPC(nn.Module):
         # Reshape: concatenate K sets of M memory tokens per sample → (B, K*M, D)
         memory_tokens = flat_memory.reshape(B, K * M, -1)
 
+        # Build memory_mask: (B, K*M) — 0 for memory from padded chunks
+        # chunk_mask (B, K, N) → any valid token per chunk → (B, K) bool
+        chunk_valid = chunk_mask.any(dim=-1)  # (B, K)
+        # Expand each chunk's validity to its M memory tokens → (B, K*M)
+        memory_mask = chunk_valid.unsqueeze(-1).expand(-1, -1, M).reshape(B, K * M).float()
+
         # Decode: [<MEM>, memory_1..memory_{K*M}, </MEM>, target]
         decoder_result = self.decoder(
             memory_tokens=memory_tokens,
+            memory_mask=memory_mask,
             target_ids=target_ids,
             target_mask=target_mask,
         )

@@ -422,11 +422,12 @@ def _estimate_tokens(text: str) -> int:
 def process_pretrain(input_dir: Path, output_dir: Path, force: bool = False,
                      eval_size: int = 500,
                      warmup_tokens: int = 100_000_000,
-                     multichunk_min_chars: int = 9000):
+                     multichunk_min_chars: int = 2000):
     """处理预训练数据: 切分为 warmup / multichunk / eval 三份.
 
     Stage 1a (warmup):     前 ~warmup_tokens 个 token 的文档 → warmup_train.jsonl
     Stage 1b (multichunk): 剩余文档中长度 >= multichunk_min_chars 的 → multichunk_train.jsonl
+                           (chunk 数量在训练时根据文档长度动态决定, min=2)
     eval:                  末尾 eval_size 条 → eval.jsonl (两阶段共用)
 
     同时保留 train.jsonl (全量训练集) 以兼容上界评估.
@@ -494,7 +495,7 @@ def process_pretrain(input_dir: Path, output_dir: Path, force: bool = False,
             if cumulative_tokens >= warmup_tokens:
                 warmup_done = True
         else:
-            # multichunk: 只保留足够长的文档 (≥ 2176 tokens ≈ multichunk_min_chars chars)
+            # multichunk: 只保留足够长的文档 (≥ 2*512+128=1152 tokens ≈ multichunk_min_chars chars)
             if len(text) >= multichunk_min_chars:
                 multichunk_lines.append(line)
             else:

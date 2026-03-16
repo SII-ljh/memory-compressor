@@ -510,17 +510,18 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
     """Stage 1b: Long window training — learn cross-chunk reading.
 
     Data:  multichunk_train.jsonl (remaining tokens after warmup)
-    Input: 4 x 512 tokens → 4 independent Perceiver compressions → concatenate → 4*M memory tokens
+    Input: K x 512 tokens → K independent Perceiver compressions → concatenate → K*M memory tokens
+           K is dynamic per sample (min_chunks..max_chunks), determined by document length.
     Target: 128 tokens continuation, loss on target only
     """
-    K = config.stage1b_num_chunks
+    K_max = config.stage1b_max_chunks
+    K_min = config.stage1b_min_chunks
     N = config.stage1b_chunk_len
     T = config.stage1b_max_cont_len
-    total_input = K * N + T
 
     logger.info("=== Stage 1b: Long Window Multi-Chunk Training ===")
     logger.info(f"use_decoupled_rope={config.use_decoupled_rope}")
-    logger.info(f"num_chunks={K}, chunk_len={N}, cont_len={T}, total_input={total_input}")
+    logger.info(f"chunks=[{K_min},{K_max}], chunk_len={N}, cont_len={T}")
 
     # Build model
     model = QCPC(config)
@@ -582,7 +583,7 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
                 f"s1b_{mode}"
                 f"_{qwen_name}"
                 f"_M{config.num_memory_tokens}"
-                f"_K{K}x{N}"
+                f"_K{K_min}-{K_max}x{N}"
                 f"_lr{config.stage1_lr}"
                 f"_bs{per_gpu_bs}x{accum_steps}"
                 f"_ep{config.stage1b_max_epochs}"
@@ -602,7 +603,8 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
                 "world_size": accelerator.num_processes,
                 "effective_batch_size": per_gpu_bs * accum_steps * accelerator.num_processes,
                 "max_epochs": config.stage1b_max_epochs,
-                "num_chunks": K,
+                "max_chunks": K_max,
+                "min_chunks": K_min,
                 "chunk_len": N,
                 "cont_len": T,
                 "total_trainable": counts["total_trainable"],
@@ -624,7 +626,8 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
         data_path=config.stage1b_train_data_path,
         tokenizer=tokenizer,
         batch_size=per_gpu_bs,
-        num_chunks=K,
+        max_chunks=K_max,
+        min_chunks=K_min,
         chunk_len=N,
         cont_len=T,
         num_workers=config.num_workers,
@@ -633,7 +636,8 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
         data_path=config.pretrain_eval_data_path,
         tokenizer=tokenizer,
         batch_size=per_gpu_bs,
-        num_chunks=K,
+        max_chunks=K_max,
+        min_chunks=K_min,
         chunk_len=N,
         cont_len=T,
         num_workers=config.num_workers,

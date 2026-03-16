@@ -74,22 +74,25 @@ class PretrainMultiChunkDataset(Dataset):
     whose memory tokens are concatenated and fed to the decoder to predict
     a continuation target.
 
-    Total tokens per sample: K * chunk_len + cont_len  (e.g. 4*512+128 = 2176).
+    K is determined dynamically per document:
+        K = clamp(available_tokens // chunk_len, min_chunks, max_chunks)
+    This avoids discarding shorter documents while still supporting long ones.
     """
 
     def __init__(
         self,
         data_path: str,
         tokenizer: AutoTokenizer,
-        num_chunks: int = 4,
+        max_chunks: int = 8,
+        min_chunks: int = 2,
         chunk_len: int = 512,
         cont_len: int = 128,
     ):
         self.tokenizer = tokenizer
-        self.num_chunks = num_chunks
+        self.max_chunks = max_chunks
+        self.min_chunks = min_chunks
         self.chunk_len = chunk_len
         self.cont_len = cont_len
-        self.total_len = num_chunks * chunk_len + cont_len
 
         self.records = []
         with open(data_path, "r", encoding="utf-8") as f:
@@ -108,26 +111,33 @@ class PretrainMultiChunkDataset(Dataset):
         text = self.records[idx]["text"]
         tokens = self.tokenizer.encode(text, add_special_tokens=False)
 
-        # Truncate or pad to exact total_len
-        if len(tokens) >= self.total_len:
-            tokens = tokens[:self.total_len]
+        # Determine K based on document length
+        available = len(tokens) - self.cont_len
+        K = max(self.min_chunks, min(self.max_chunks, available // self.chunk_len))
+
+        total_needed = K * self.chunk_len + self.cont_len
+
+        # Truncate or pad
+        if len(tokens) >= total_needed:
+            tokens = tokens[:total_needed]
         else:
             pad_id = self.tokenizer.pad_token_id or 0
-            tokens = tokens + [pad_id] * (self.total_len - len(tokens))
+            tokens = tokens + [pad_id] * (total_needed - len(tokens))
 
         # Split: K chunks of chunk_len + cont_len target
         chunk_ids = []
-        for i in range(self.num_chunks):
+        for i in range(K):
             start = i * self.chunk_len
             end = start + self.chunk_len
             chunk_ids.append(tokens[start:end])
 
-        target_start = self.num_chunks * self.chunk_len
+        target_start = K * self.chunk_len
         target_ids = tokens[target_start:target_start + self.cont_len]
 
         return {
             "chunk_ids": chunk_ids,   # list of K lists, each chunk_len
             "target_ids": target_ids,  # list of cont_len
+            "num_chunks": K,
         }
 
 
@@ -202,28 +212,35 @@ def collate_fn(batch: list[dict]) -> dict:
 
 
 def collate_multi_chunk_fn(batch: list[dict]) -> dict:
-    """Collate for PretrainMultiChunkDataset.
+    """Collate for PretrainMultiChunkDataset with variable chunk counts.
 
-    All chunks are fixed-size (chunk_len) and targets are fixed-size (cont_len),
-    so we simply stack into tensors without padding.
+    Pads the chunk dimension to the max K in the batch.
+    Padded chunks get all-zero masks so the model can ignore them.
     """
-    # chunk_ids: (B, K, chunk_len)
-    chunk_ids = torch.tensor(
-        [item["chunk_ids"] for item in batch], dtype=torch.long
-    )
-    chunk_mask = torch.ones_like(chunk_ids)
+    chunk_len = len(batch[0]["chunk_ids"][0])
+    max_K = max(item["num_chunks"] for item in batch)
+    B = len(batch)
 
-    # target_ids: (B, cont_len)
+    chunk_ids = torch.zeros(B, max_K, chunk_len, dtype=torch.long)
+    chunk_mask = torch.zeros(B, max_K, chunk_len, dtype=torch.long)
+
+    for i, item in enumerate(batch):
+        K_i = item["num_chunks"]
+        for k in range(K_i):
+            chunk_ids[i, k] = torch.tensor(item["chunk_ids"][k], dtype=torch.long)
+            chunk_mask[i, k] = 1  # all positions valid for real chunks
+
+    # target_ids: (B, cont_len) — fixed size, no padding needed
     target_ids = torch.tensor(
         [item["target_ids"] for item in batch], dtype=torch.long
     )
     target_mask = torch.ones_like(target_ids)
 
     return {
-        "chunk_ids": chunk_ids,
-        "chunk_mask": chunk_mask,
-        "target_ids": target_ids,
-        "target_mask": target_mask,
+        "chunk_ids": chunk_ids,      # (B, max_K, chunk_len)
+        "chunk_mask": chunk_mask,     # (B, max_K, chunk_len)
+        "target_ids": target_ids,     # (B, cont_len)
+        "target_mask": target_mask,   # (B, cont_len)
     }
 
 
@@ -256,7 +273,8 @@ def create_multi_chunk_dataloader(
     data_path: str,
     tokenizer: AutoTokenizer,
     batch_size: int,
-    num_chunks: int = 4,
+    max_chunks: int = 8,
+    min_chunks: int = 2,
     chunk_len: int = 512,
     cont_len: int = 128,
     num_workers: int = 4,
@@ -265,7 +283,7 @@ def create_multi_chunk_dataloader(
     drop_last: bool = True,
 ) -> DataLoader:
     dataset = PretrainMultiChunkDataset(
-        data_path, tokenizer, num_chunks, chunk_len, cont_len
+        data_path, tokenizer, max_chunks, min_chunks, chunk_len, cont_len
     )
     if max_samples is not None and len(dataset) > max_samples:
         dataset = torch.utils.data.Subset(

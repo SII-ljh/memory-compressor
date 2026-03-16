@@ -109,8 +109,8 @@ def test_dummy_batch_stage1a_shapes():
 
 
 def test_dummy_batch_stage1b_shapes():
-    """Dummy batch for stage 1b (multi-chunk) has correct shapes."""
-    config = _make_config(stage1b_num_chunks=4, stage1b_chunk_len=32, stage1b_max_cont_len=8)
+    """Dummy batch for stage 1b (multi-chunk) uses max_chunks for worst-case probing."""
+    config = _make_config(stage1b_max_chunks=4, stage1b_min_chunks=2, stage1b_chunk_len=32, stage1b_max_cont_len=8)
     batch = _make_dummy_batch(2, config, stage="1b", device=torch.device("cpu"))
 
     assert batch["chunk_ids"].shape == (2, 4, 32), f"Got {batch['chunk_ids'].shape}"

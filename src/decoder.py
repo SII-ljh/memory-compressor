@@ -61,6 +61,7 @@ class FrozenDecoder(nn.Module):
         target_ids: torch.Tensor | None = None,
         prompt_mask: torch.Tensor | None = None,
         target_mask: torch.Tensor | None = None,
+        memory_mask: torch.Tensor | None = None,
     ) -> dict:
         """Forward pass through frozen decoder.
 
@@ -76,6 +77,7 @@ class FrozenDecoder(nn.Module):
             target_ids: (B, T) target token IDs for loss computation
             prompt_mask: (B, L) attention mask for prompt
             target_mask: (B, T) attention mask for target
+            memory_mask: (B, M) attention mask for memory (0 = padded chunk memory)
 
         Returns:
             dict with 'loss' (if target_ids given), 'logits', 'input_length'
@@ -94,7 +96,10 @@ class FrozenDecoder(nn.Module):
 
         # 2. Memory tokens H_1..H_M
         parts.append(memory_tokens)
-        mask_parts.append(torch.ones(B, memory_tokens.shape[1], device=device))
+        if memory_mask is not None:
+            mask_parts.append(memory_mask.float())
+        else:
+            mask_parts.append(torch.ones(B, memory_tokens.shape[1], device=device))
 
         # 3. </MEM> token
         mem_end = self._make_special_embed(self.mem_end_id, B, device)
