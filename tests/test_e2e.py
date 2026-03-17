@@ -211,6 +211,83 @@ def test_param_count():
     print("[PASS] test_param_count")
 
 
+def test_multi_chunk_padded_no_nan():
+    """Test that padded chunks in multi-chunk mode do NOT produce NaN.
+
+    When batch samples have different K (chunk counts), the shorter ones
+    get zero-padded chunks. These have all-zero masks, which causes
+    key_padding_mask to be all-True (ignore everything). If softmax
+    receives all -inf scores, it produces NaN — this test catches that.
+    """
+    for rope in [False, True]:
+        cfg = _make_config(rope=rope, bias=False)
+        model = QCPC(cfg)
+        model.set_stage(1)
+
+        K, chunk_N = 4, N  # 4 chunks of length N
+
+        chunk_ids = torch.randint(0, 1000, (B, K, chunk_N))
+        chunk_mask = torch.ones(B, K, chunk_N, dtype=torch.long)
+
+        # Simulate padding: second sample only has 2 valid chunks out of 4
+        chunk_ids[1, 2:] = 0
+        chunk_mask[1, 2:] = 0
+
+        target_ids = torch.randint(0, 1000, (B, T))
+        target_mask = torch.ones(B, T, dtype=torch.long)
+
+        result = model(
+            chunk_ids=chunk_ids,
+            chunk_mask=chunk_mask,
+            target_ids=target_ids,
+            target_mask=target_mask,
+        )
+
+        assert not torch.isnan(result["loss"]), (
+            f"rope={rope}: NaN loss from padded multi-chunk! "
+            f"This means softmax over all-masked keys produced NaN."
+        )
+        assert not torch.isinf(result["loss"]), f"rope={rope}: Inf loss"
+
+        result["loss"].backward()
+
+        # Perceiver grads should be finite
+        for name, p in model.perceiver.named_parameters():
+            if p.grad is not None:
+                assert torch.isfinite(p.grad).all(), f"rope={rope}: Non-finite grad in {name}"
+
+        model.zero_grad()
+        mode = "RoPE" if rope else "Baseline"
+        print(f"  [PASS] {mode}: loss={result['loss'].item():.4f}")
+
+    print("[PASS] test_multi_chunk_padded_no_nan")
+
+
+def test_all_masked_context_no_nan():
+    """Test that a fully-masked context (edge case) does not produce NaN."""
+    cfg = _make_config(rope=False, bias=False)
+    model = QCPC(cfg)
+    model.set_stage(1)
+
+    context_ids = torch.randint(0, 1000, (B, N))
+    context_mask = torch.ones(B, N, dtype=torch.long)
+    # Sample 0 has no valid context tokens at all
+    context_mask[0, :] = 0
+
+    target_ids = torch.randint(0, 1000, (B, T))
+    target_mask = torch.ones(B, T, dtype=torch.long)
+
+    result = model(
+        context_ids=context_ids,
+        context_mask=context_mask,
+        target_ids=target_ids,
+        target_mask=target_mask,
+    )
+    assert not torch.isnan(result["loss"]), "NaN loss from all-masked context!"
+    result["loss"].backward()
+    print(f"[PASS] test_all_masked_context_no_nan: loss={result['loss'].item():.4f}")
+
+
 if __name__ == "__main__":
     test_e2e_baseline_inference()
     test_e2e_baseline_training()
@@ -220,4 +297,6 @@ if __name__ == "__main__":
     test_e2e_with_masks()
     test_stage_freeze_logic()
     test_param_count()
+    test_multi_chunk_padded_no_nan()
+    test_all_masked_context_no_nan()
     print("\n=== All E2E tests PASSED ===")

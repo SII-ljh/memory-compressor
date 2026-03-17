@@ -138,6 +138,9 @@ class StandardAttention(nn.Module):
             )
 
         attn = F.softmax(scores, dim=-1)
+        # When all keys are masked (e.g. padded chunks), softmax over all -inf
+        # produces NaN. Replace with zeros so padded positions contribute nothing.
+        attn = attn.nan_to_num(0.0)
         out = torch.matmul(attn, V)  # (B, n_h, M, d_h)
         out = out.transpose(1, 2).contiguous().view(B, M, -1)  # (B, M, n_h*d_h)
         return self.W_O(out)
@@ -237,6 +240,9 @@ class DecoupledRoPEAttention(nn.Module):
             )
 
         attn = F.softmax(scores, dim=-1)
+        # When all keys are masked (e.g. padded chunks), softmax over all -inf
+        # produces NaN. Replace with zeros so padded positions contribute nothing.
+        attn = attn.nan_to_num(0.0)
 
         # Value projection (standard, no position encoding)
         V = self.W_V(key_value).view(B, N, self.n_h, self.d_h).transpose(1, 2)  # (B, n_h, N, d_h)
