@@ -421,7 +421,7 @@ def _estimate_tokens(text: str) -> int:
 
 def process_pretrain(input_dir: Path, output_dir: Path, force: bool = False,
                      eval_size: int = 500,
-                     warmup_tokens: int = 100_000_000,
+                     warmup_tokens: int = 500_000_000,
                      multichunk_min_chars: int = 2000):
     """处理预训练数据: 切分为 warmup / multichunk / eval 三份.
 

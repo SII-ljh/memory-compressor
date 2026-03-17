@@ -18,7 +18,7 @@ if [[ ${NUM_GPUS} -eq 1 ]]; then
       ffn_intermediate_dim=2048 \
       query_mapper_mid_dim=512 \
       num_memory_tokens=64 \
-      stage1a_max_epochs=1 \
+      stage1a_max_epochs=3 \
       output_dir=./outputs/qwen06b_m64
 else
   accelerate launch --num_processes "${NUM_GPUS}" --multi_gpu \
@@ -34,6 +34,6 @@ else
       ffn_intermediate_dim=2048 \
       query_mapper_mid_dim=512 \
       num_memory_tokens=64 \
-      stage1a_max_epochs=1 \
+      stage1a_max_epochs=3 \
       output_dir=./outputs/qwen06b_m64
 fi
