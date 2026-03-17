@@ -84,12 +84,24 @@ if [[ "${STAGE}" == "all" || "${STAGE}" == "1" ]]; then
     for key in "${SELECTED_KEYS[@]}"; do
         MODEL_PATH="${MODEL_MAP[$key]}"
         MODEL_NAME="Qwen3-${key}"
-        OUT_FILE="${OUTPUT_DIR}/stage1_upper_bound_${MODEL_NAME}.json"
 
-        echo ">>> [${MODEL_NAME}] Stage 1 Upper Bound (Direct NTP)..."
+        # Stage 1a upper bound: short window (512 → 128)
+        OUT_FILE="${OUTPUT_DIR}/stage1a_upper_bound_${MODEL_NAME}.json"
+        echo ">>> [${MODEL_NAME}] Stage 1a Upper Bound (512→128, Direct NTP)..."
         python scripts/benchmark/stage1_upper_bound.py \
             --config "${CONFIG}" \
             --model_path "${MODEL_PATH}" \
+            --substage 1a \
+            --output "${OUT_FILE}"
+        echo ""
+
+        # Stage 1b upper bound: multi-chunk (K*512 → 128)
+        OUT_FILE="${OUTPUT_DIR}/stage1b_upper_bound_${MODEL_NAME}.json"
+        echo ">>> [${MODEL_NAME}] Stage 1b Upper Bound (K*512→128, Direct NTP)..."
+        python scripts/benchmark/stage1_upper_bound.py \
+            --config "${CONFIG}" \
+            --model_path "${MODEL_PATH}" \
+            --substage 1b \
             --output "${OUT_FILE}"
         echo ""
     done
@@ -146,7 +158,8 @@ echo "=============================================="
 echo " Done! Results:"
 if [[ "${STAGE}" == "all" || "${STAGE}" == "1" ]]; then
     for key in "${SELECTED_KEYS[@]}"; do
-        echo "  ${OUTPUT_DIR}/stage1_upper_bound_Qwen3-${key}.json"
+        echo "  ${OUTPUT_DIR}/stage1a_upper_bound_Qwen3-${key}.json"
+        echo "  ${OUTPUT_DIR}/stage1b_upper_bound_Qwen3-${key}.json"
     done
 fi
 if [[ "${STAGE}" == "all" || "${STAGE}" == "2" ]]; then

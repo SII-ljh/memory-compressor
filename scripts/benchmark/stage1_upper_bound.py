@@ -6,13 +6,27 @@ the full context directly to the Qwen3 model (no Perceiver compression).
 This establishes the ceiling for QCPC Stage 1:
   QCPC_loss >= upper_bound_loss  (more compression → higher loss)
 
+Supports three substage conditions matching actual training:
+  --substage 1a     → context=512, cont=128   (matches Stage 1a short-window warmup)
+  --substage 1b     → context=K*512, cont=128 (matches Stage 1b multi-chunk)
+  --substage legacy → context=4096, cont=256  (original single-stage setting)
+
 Input: pretrain eval split (data/stage1/eval.jsonl).
 Method: Feed [context + continuation] as one sequence to Qwen3, compute NTP loss
         on the continuation tokens only (same target region as QCPC).
 
 Usage:
-    python scripts/benchmark/stage1_upper_bound.py --config config/default.yaml
-    python scripts/benchmark/stage1_upper_bound.py --config config/default.yaml --batch_size 4
+    # Stage 1a upper bound (short window: 512→128)
+    python scripts/benchmark/stage1_upper_bound.py --config config/default.yaml --substage 1a
+
+    # Stage 1b upper bound (multi-chunk: K*512→128)
+    python scripts/benchmark/stage1_upper_bound.py --config config/default.yaml --substage 1b
+
+    # Legacy (4096→256)
+    python scripts/benchmark/stage1_upper_bound.py --config config/default.yaml --substage legacy
+
+    # Custom lengths
+    python scripts/benchmark/stage1_upper_bound.py --substage 1a --context_len 1024 --cont_len 128
 """
 
 import argparse
@@ -166,10 +180,18 @@ def main():
     parser.add_argument("--config", type=str, default="config/default.yaml")
     parser.add_argument("--model_path", type=str, default=None,
                         help="Override qwen3_model_path from config")
+    parser.add_argument("--substage", type=str, choices=["1a", "1b", "legacy"], default="legacy",
+                        help="Which stage conditions to use: "
+                             "1a (512/128), 1b (K*512/128), legacy (4096/256)")
+    parser.add_argument("--context_len", type=int, default=None,
+                        help="Override context length (default: from config based on substage)")
+    parser.add_argument("--cont_len", type=int, default=None,
+                        help="Override continuation length (default: from config based on substage)")
     parser.add_argument("--batch_size", type=int, default=0,
                         help="Batch size (0 = auto-detect)")
     parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--output", type=str, default="./outputs/benchmark/stage1_upper_bound.json")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output JSON path (default: auto from substage)")
     args = parser.parse_args()
 
     logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
@@ -177,8 +199,27 @@ def main():
     if args.model_path:
         config.qwen3_model_path = args.model_path
 
+    # Resolve context/cont lengths based on substage
+    if args.substage == "1a":
+        context_len = args.context_len or config.stage1a_max_context_len
+        cont_len = args.cont_len or config.stage1a_max_cont_len
+    elif args.substage == "1b":
+        # Stage 1b: K_max chunks of chunk_len as total context
+        context_len = args.context_len or (config.stage1b_max_chunks * config.stage1b_chunk_len)
+        cont_len = args.cont_len or config.stage1b_max_cont_len
+    else:
+        context_len = args.context_len or config.stage1_max_context_len
+        cont_len = args.cont_len or config.stage1_max_cont_len
+
+    # Default output path
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = Path(f"./outputs/benchmark/stage1_upper_bound_{args.substage}.json")
+
     eval_path = config.pretrain_eval_data_path
     logger.info(f"Eval data: {eval_path}")
+    logger.info(f"Substage: {args.substage}, context_len={context_len}, cont_len={cont_len}")
 
     # Load model
     logger.info(f"Loading Qwen3 from {config.qwen3_model_path}")
@@ -195,13 +236,13 @@ def main():
     # Auto batch size
     batch_size = args.batch_size
     if batch_size <= 0 and device.type == "cuda":
-        max_seq_len = config.stage1_max_context_len + config.stage1_max_cont_len
+        max_seq_len = context_len + cont_len
         batch_size = _probe_max_batch_size(model, max_seq_len, device)
     elif batch_size <= 0:
         batch_size = 4
     logger.info(f"Using batch_size={batch_size}")
 
-    dataset = DirectNTPDataset(eval_path, tokenizer, config.stage1_max_context_len, config.stage1_max_cont_len)
+    dataset = DirectNTPDataset(eval_path, tokenizer, context_len, cont_len)
     if args.max_samples and len(dataset) > args.max_samples:
         dataset = torch.utils.data.Subset(dataset, range(args.max_samples))
     logger.info(f"Eval samples: {len(dataset)}")
@@ -210,23 +251,25 @@ def main():
 
     results = evaluate_direct_ntp(model, dataloader, device)
 
+    substage_label = {"1a": "Stage 1a (512→128)", "1b": "Stage 1b (K*512→128)", "legacy": "Legacy (4096→256)"}
     print(f"\n{'='*60}")
     print(f"Stage 1 Upper Bound: Qwen3 Direct NTP (no compression)")
+    print(f"  Condition: {substage_label.get(args.substage, args.substage)}")
     print(f"{'='*60}")
     print(f"  Loss: {results['loss']:.4f}")
     print(f"  PPL:  {results['ppl']:.2f}")
     print(f"  Tokens evaluated: {results['total_tokens']}")
-    print(f"  Context len: {config.stage1_max_context_len}, Cont len: {config.stage1_max_cont_len}")
+    print(f"  Context len: {context_len}, Cont len: {cont_len}")
     print(f"{'='*60}")
     print(f"QCPC Stage 1 loss should be >= {results['loss']:.4f}")
 
-    output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_data = {
         "benchmark": "stage1_upper_bound",
+        "substage": args.substage,
         "model": config.qwen3_model_path,
-        "context_len": config.stage1_max_context_len,
-        "continuation_len": config.stage1_max_cont_len,
+        "context_len": context_len,
+        "continuation_len": cont_len,
         "num_samples": len(dataset),
         **results,
     }
