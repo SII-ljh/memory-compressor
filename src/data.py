@@ -12,52 +12,48 @@ class PretrainDataset(Dataset):
     """Stage 1: Text completion pretraining dataset.
 
     Reads JSONL with {"text": "...", "id": "..."} format.
-    Splits each text into prefix (context for compression) and continuation (target).
+    Each text is tokenized and sliced into fixed-length segments (sample_len).
+    Segments shorter than sample_len are discarded.
+    Each segment is split into context (for compression) and continuation (target).
     """
 
     def __init__(
         self,
         data_path: str,
         tokenizer: AutoTokenizer,
-        max_context_len: int = 4096,
-        max_cont_len: int = 256,
+        max_context_len: int = 512,
+        max_cont_len: int = 128,
+        sample_len: int = 640,
     ):
         self.tokenizer = tokenizer
         self.max_context_len = max_context_len
         self.max_cont_len = max_cont_len
+        self.sample_len = sample_len
 
-        self.records = []
+        # Pre-chunk: tokenize all texts and slice into fixed-length segments
+        self.samples = []
         with open(data_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    try:
-                        self.records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                tokens = tokenizer.encode(rec["text"], add_special_tokens=False)
+                # Slice into non-overlapping segments of sample_len, drop remainder
+                for start in range(0, len(tokens) - sample_len + 1, sample_len):
+                    self.samples.append(tokens[start:start + sample_len])
 
     def __len__(self):
-        return len(self.records)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        text = self.records[idx]["text"]
+        tokens = self.samples[idx]  # exactly sample_len tokens
 
-        # Tokenize full text
-        tokens = self.tokenizer.encode(text, add_special_tokens=False)
-
-        # Split: first part = context (for compression), rest = continuation (target)
-        total_max = self.max_context_len + self.max_cont_len
-        if len(tokens) > total_max:
-            # Take a window that fits
-            tokens = tokens[:total_max]
-
-        # Need at least max_cont_len tokens for a valid split
-        if len(tokens) < self.max_cont_len + 10:
-            # Too short, pad context minimally
-            split_point = max(1, len(tokens) - self.max_cont_len)
-        else:
-            split_point = min(len(tokens) - self.max_cont_len, self.max_context_len)
-
+        # Split: context for compression, continuation as target
+        split_point = min(len(tokens) - self.max_cont_len, self.max_context_len)
         context_ids = tokens[:split_point]
         cont_ids = tokens[split_point:split_point + self.max_cont_len]
 
@@ -83,7 +79,7 @@ class PretrainMultiChunkDataset(Dataset):
         self,
         data_path: str,
         tokenizer: AutoTokenizer,
-        max_chunks: int = 8,
+        max_chunks: int = 4,
         min_chunks: int = 2,
         chunk_len: int = 512,
         cont_len: int = 128,
@@ -94,35 +90,29 @@ class PretrainMultiChunkDataset(Dataset):
         self.chunk_len = chunk_len
         self.cont_len = cont_len
 
-        self.records = []
+        # Pre-chunk: slice long texts into fixed-length samples
+        sample_len = max_chunks * chunk_len + cont_len  # 512*4+128=2176
+        self.samples = []
         with open(data_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    try:
-                        self.records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                tokens = tokenizer.encode(rec["text"], add_special_tokens=False)
+                # Slice into non-overlapping segments of sample_len, drop remainder
+                for start in range(0, len(tokens) - sample_len + 1, sample_len):
+                    self.samples.append(tokens[start:start + sample_len])
 
     def __len__(self):
-        return len(self.records)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        text = self.records[idx]["text"]
-        tokens = self.tokenizer.encode(text, add_special_tokens=False)
-
-        # Determine K based on document length
-        available = len(tokens) - self.cont_len
-        K = max(self.min_chunks, min(self.max_chunks, available // self.chunk_len))
-
-        total_needed = K * self.chunk_len + self.cont_len
-
-        # Truncate or pad
-        if len(tokens) >= total_needed:
-            tokens = tokens[:total_needed]
-        else:
-            pad_id = self.tokenizer.pad_token_id or 0
-            tokens = tokens + [pad_id] * (total_needed - len(tokens))
+        tokens = self.samples[idx]  # exactly sample_len tokens
+        K = self.max_chunks
 
         # Split: K chunks of chunk_len + cont_len target
         chunk_ids = []
