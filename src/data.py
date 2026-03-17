@@ -30,6 +30,12 @@ class PretrainDataset(Dataset):
         self.max_cont_len = max_cont_len
         self.sample_len = sample_len
 
+        # Suppress "Token indices sequence length is longer than the specified
+        # maximum sequence length" warning — we segment into fixed-length
+        # samples ourselves, so the tokenizer's model_max_length is irrelevant.
+        _orig_max_len = tokenizer.model_max_length
+        tokenizer.model_max_length = int(1e18)
+
         # Pre-chunk: tokenize all texts and slice into fixed-length segments
         self.samples = []
         with open(data_path, "r", encoding="utf-8") as f:
@@ -45,6 +51,8 @@ class PretrainDataset(Dataset):
                 # Slice into non-overlapping segments of sample_len, drop remainder
                 for start in range(0, len(tokens) - sample_len + 1, sample_len):
                     self.samples.append(tokens[start:start + sample_len])
+
+        tokenizer.model_max_length = _orig_max_len
 
     def __len__(self):
         return len(self.samples)
@@ -90,6 +98,10 @@ class PretrainMultiChunkDataset(Dataset):
         self.chunk_len = chunk_len
         self.cont_len = cont_len
 
+        # Suppress tokenizer max length warning (same as PretrainDataset)
+        _orig_max_len = tokenizer.model_max_length
+        tokenizer.model_max_length = int(1e18)
+
         # Pre-chunk: slice long texts into fixed-length samples
         sample_len = max_chunks * chunk_len + cont_len  # 512*4+128=2176
         self.samples = []
@@ -106,6 +118,8 @@ class PretrainMultiChunkDataset(Dataset):
                 # Slice into non-overlapping segments of sample_len, drop remainder
                 for start in range(0, len(tokens) - sample_len + 1, sample_len):
                     self.samples.append(tokens[start:start + sample_len])
+
+        tokenizer.model_max_length = _orig_max_len
 
     def __len__(self):
         return len(self.samples)

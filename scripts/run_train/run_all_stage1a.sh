@@ -35,13 +35,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ─── Experiment definitions ─────────────────────────────────────────
-# Format: name|gpus|label
+# Format: name|gpus|port|label
+# Each experiment gets a unique MASTER_PORT to avoid conflicts when running in parallel.
 ALL_EXPS=(
-    "06b_m64|0|Qwen3-0.6B M=64"
-    "06b_m128|1|Qwen3-0.6B M=128"
-    "06b_m256|2|Qwen3-0.6B M=256"
-    "17b_m128|3,4|Qwen3-1.7B M=128"
-    "4b_m128|5,6,7|Qwen3-4B M=128"
+    "06b_m64|0|29500|Qwen3-0.6B M=64"
+    "06b_m128|1|29501|Qwen3-0.6B M=128"
+    "06b_m256|2|29502|Qwen3-0.6B M=256"
+    "17b_m128|3,4|29503|Qwen3-1.7B M=128"
+    "4b_m128|5,6,7|29504|Qwen3-4B M=128"
 )
 
 # Map experiment name → script filename
@@ -67,7 +68,7 @@ if [[ -n "${EXPERIMENTS}" ]]; then
     IFS=',' read -ra FILTER <<< "${EXPERIMENTS}"
     SELECTED=()
     for entry in "${ALL_EXPS[@]}"; do
-        name="${entry%%|*}"
+        name="${entry%%|*}"  # extract first field (name)
         for f in "${FILTER[@]}"; do
             if [[ "${f}" == "${name}" ]]; then
                 SELECTED+=("${entry}")
@@ -92,7 +93,8 @@ count_gpus() {
 launch_experiment() {
     local name="$1"
     local gpus="$2"
-    local label="$3"
+    local port="$3"
+    local label="$4"
     local num_gpus
     num_gpus=$(count_gpus "${gpus}")
     local script="${SCRIPT_MAP[$name]}"
@@ -101,9 +103,10 @@ launch_experiment() {
     mkdir -p "${outdir}"
     local logfile="${outdir}/stage1a_train.log"
 
-    echo "  [LAUNCH] ${label} → GPU ${gpus} (${num_gpus} GPU(s)) | log: ${logfile}"
+    echo "  [LAUNCH] ${label} → GPU ${gpus} (${num_gpus} GPU(s)), port ${port} | log: ${logfile}"
 
     CUDA_VISIBLE_DEVICES="${gpus}" NUM_GPUS="${num_gpus}" \
+        MASTER_PORT="${port}" \
         bash "${SCRIPT_DIR}/${script}" \
         > "${logfile}" 2>&1 &
 }
@@ -115,9 +118,9 @@ echo "=========================================================="
 echo ""
 echo "  GPU allocation:"
 for entry in "${ALL_EXPS[@]}"; do
-    IFS='|' read -r name gpus label <<< "${entry}"
+    IFS='|' read -r name gpus port label <<< "${entry}"
     num_gpus=$(count_gpus "${gpus}")
-    printf "    GPU %-7s : %-25s (%d GPU)\n" "${gpus}" "${label}" "${num_gpus}"
+    printf "    GPU %-7s : %-25s (%d GPU, port %s)\n" "${gpus}" "${label}" "${num_gpus}" "${port}"
 done
 echo ""
 echo "  Launching ${#ALL_EXPS[@]} experiments in parallel..."
@@ -127,8 +130,8 @@ PIDS=()
 NAMES=()
 
 for entry in "${ALL_EXPS[@]}"; do
-    IFS='|' read -r name gpus label <<< "${entry}"
-    launch_experiment "${name}" "${gpus}" "${label}"
+    IFS='|' read -r name gpus port label <<< "${entry}"
+    launch_experiment "${name}" "${gpus}" "${port}" "${label}"
     PIDS+=($!)
     NAMES+=("${name}")
 done

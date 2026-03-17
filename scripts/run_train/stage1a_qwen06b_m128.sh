@@ -22,6 +22,7 @@ if [[ ${NUM_GPUS} -eq 1 ]]; then
       output_dir=./outputs/qwen06b_m128
 else
   accelerate launch --num_processes "${NUM_GPUS}" --multi_gpu \
+    --main_process_port "${MASTER_PORT:-29500}" \
     src/train.py --config config/default.yaml --stage 1a \
     --override \
       use_decoupled_rope=false \
