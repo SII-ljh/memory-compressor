@@ -142,6 +142,6 @@ def compute_accumulation_steps(
             f"num_gpus={num_gpus}, target_ebs={target_ebs}"
         )
     per_step_total = per_gpu_batch_size * num_gpus
-    accum_steps = math.ceil(target_ebs / per_step_total)
+    accum_steps = max(1, target_ebs // per_step_total)
     actual_ebs = per_step_total * accum_steps
     return accum_steps, actual_ebs

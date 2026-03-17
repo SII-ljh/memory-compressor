@@ -137,8 +137,8 @@ def _resolve_batch_params(
     stage: str,
     world_size: int,
     rank: int,
-) -> tuple[int, int]:
-    """Resolve per-GPU batch size and gradient accumulation steps.
+) -> tuple[int, int, int]:
+    """Resolve per-GPU batch size, gradient accumulation steps, and actual EBS.
 
     If auto_batch_size is enabled, probes GPU memory on rank 0 and broadcasts
     the result. Otherwise falls back to config values.
@@ -147,13 +147,16 @@ def _resolve_batch_params(
         stage: "1a", "1b", or "2"
 
     Returns:
-        (per_gpu_batch_size, gradient_accumulation_steps)
+        (per_gpu_batch_size, gradient_accumulation_steps, actual_effective_batch_size)
     """
     if not config.auto_batch_size:
         if stage in ("1a", "1b"):
-            return config.stage1_batch_size, config.stage1_gradient_accumulation_steps
+            bs = config.stage1_batch_size
+            accum = config.stage1_gradient_accumulation_steps
         else:
-            return config.stage2_batch_size, config.stage2_gradient_accumulation_steps
+            bs = config.stage2_batch_size
+            accum = config.stage2_gradient_accumulation_steps
+        return bs, accum, bs * world_size * accum
 
     # --- Auto batch probing ---
     device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
@@ -161,9 +164,12 @@ def _resolve_batch_params(
     if not torch.cuda.is_available():
         logger.warning("CUDA not available, falling back to config batch size")
         if stage in ("1a", "1b"):
-            return config.stage1_batch_size, config.stage1_gradient_accumulation_steps
+            bs = config.stage1_batch_size
+            accum = config.stage1_gradient_accumulation_steps
         else:
-            return config.stage2_batch_size, config.stage2_gradient_accumulation_steps
+            bs = config.stage2_batch_size
+            accum = config.stage2_gradient_accumulation_steps
+        return bs, accum, bs * world_size * accum
 
     # Only rank 0 probes; others wait for the broadcast
     if rank == 0:
@@ -182,15 +188,24 @@ def _resolve_batch_params(
         torch.distributed.broadcast(bs_tensor, src=0)
 
     per_gpu_bs = bs_tensor.item()
+    # Cap per-GPU batch size so single-step EBS doesn't exceed target
+    target_ebs = config.target_effective_batch_size
+    max_per_gpu = max(1, target_ebs // world_size)
+    if per_gpu_bs > max_per_gpu:
+        logger.info(
+            f"Auto batch: capping per_gpu_bs from {per_gpu_bs} to {max_per_gpu} "
+            f"(target_ebs={target_ebs}, world_size={world_size})"
+        )
+        per_gpu_bs = max_per_gpu
     accum_steps, actual_ebs = compute_accumulation_steps(
-        per_gpu_bs, world_size, config.target_effective_batch_size
+        per_gpu_bs, world_size, target_ebs
     )
     logger.info(
         f"Auto batch: per_gpu_bs={per_gpu_bs}, accum_steps={accum_steps}, "
-        f"actual_ebs={actual_ebs} (target={config.target_effective_batch_size}), "
+        f"actual_ebs={actual_ebs} (target={target_ebs}), "
         f"world_size={world_size}"
     )
-    return per_gpu_bs, accum_steps
+    return per_gpu_bs, accum_steps, actual_ebs
 
 
 @torch.no_grad()
@@ -291,9 +306,13 @@ def train_stage1a(config: QCPCConfig, resume_path: str | None = None):
     # Resolve batch parameters
     rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    per_gpu_bs, accum_steps = _resolve_batch_params(
+    per_gpu_bs, accum_steps, actual_ebs = _resolve_batch_params(
         model, config, stage="1a", world_size=world_size, rank=rank,
     )
+
+    # Scale LR linearly with actual EBS
+    base_lr = config.stage1_lr
+    scaled_lr = base_lr * (actual_ebs / config.target_effective_batch_size)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=accum_steps,
@@ -312,7 +331,7 @@ def train_stage1a(config: QCPCConfig, resume_path: str | None = None):
                 f"_{qwen_name}"
                 f"_M{config.num_memory_tokens}"
                 f"_ctx{config.stage1a_max_context_len}"
-                f"_lr{config.stage1_lr}"
+                f"_lr{scaled_lr}"
                 f"_bs{per_gpu_bs}x{accum_steps}"
                 f"_ep{config.stage1a_max_epochs}"
             ),
@@ -325,11 +344,12 @@ def train_stage1a(config: QCPCConfig, resume_path: str | None = None):
                 "hidden_dim": config.hidden_dim,
                 "num_memory_tokens": config.num_memory_tokens,
                 "num_process_layers": config.num_process_layers,
-                "lr": config.stage1_lr,
+                "base_lr": base_lr,
+                "scaled_lr": scaled_lr,
                 "batch_size": per_gpu_bs,
                 "accum_steps": accum_steps,
                 "world_size": accelerator.num_processes,
-                "effective_batch_size": per_gpu_bs * accum_steps * accelerator.num_processes,
+                "effective_batch_size": actual_ebs,
                 "max_epochs": config.stage1a_max_epochs,
                 "max_context_len": config.stage1a_max_context_len,
                 "max_cont_len": config.stage1a_max_cont_len,
@@ -341,10 +361,11 @@ def train_stage1a(config: QCPCConfig, resume_path: str | None = None):
         logger.info(f"Config: {config}")
         logger.info(f"Devices: {accelerator.num_processes}")
         logger.info(f"per_gpu_batch_size={per_gpu_bs}, gradient_accumulation_steps={accum_steps}")
+        logger.info(f"LR scaling: base_lr={base_lr:.2e} * (ebs={actual_ebs}/target={config.target_effective_batch_size}) = {scaled_lr:.2e}")
 
     # Optimizer
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable_params, lr=config.stage1_lr, weight_decay=config.stage1_weight_decay)
+    optimizer = AdamW(trainable_params, lr=scaled_lr, weight_decay=config.stage1_weight_decay)
 
     # Data loaders
     tokenizer = model.decoder.tokenizer
@@ -377,7 +398,7 @@ def train_stage1a(config: QCPCConfig, resume_path: str | None = None):
     total_steps = steps_per_epoch * max_epochs
     warmup_steps = int(total_steps * config.stage1_warmup_ratio)
     warmup_scheduler = LinearLR(optimizer, start_factor=0.01, total_iters=warmup_steps)
-    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=config.stage1_lr * 0.01)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=scaled_lr * 0.01)
     scheduler = SequentialLR(optimizer, [warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
     if accelerator.is_main_process:
@@ -564,9 +585,13 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
     # Resolve batch parameters
     rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    per_gpu_bs, accum_steps = _resolve_batch_params(
+    per_gpu_bs, accum_steps, actual_ebs = _resolve_batch_params(
         model, config, stage="1b", world_size=world_size, rank=rank,
     )
+
+    # Scale LR linearly with actual EBS
+    base_lr = config.stage1_lr
+    scaled_lr = base_lr * (actual_ebs / config.target_effective_batch_size)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=accum_steps,
@@ -585,7 +610,7 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
                 f"_{qwen_name}"
                 f"_M{config.num_memory_tokens}"
                 f"_K{K_min}-{K_max}x{N}"
-                f"_lr{config.stage1_lr}"
+                f"_lr{scaled_lr}"
                 f"_bs{per_gpu_bs}x{accum_steps}"
                 f"_ep{config.stage1b_max_epochs}"
             ),
@@ -598,11 +623,12 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
                 "hidden_dim": config.hidden_dim,
                 "num_memory_tokens": config.num_memory_tokens,
                 "num_process_layers": config.num_process_layers,
-                "lr": config.stage1_lr,
+                "base_lr": base_lr,
+                "scaled_lr": scaled_lr,
                 "batch_size": per_gpu_bs,
                 "accum_steps": accum_steps,
                 "world_size": accelerator.num_processes,
-                "effective_batch_size": per_gpu_bs * accum_steps * accelerator.num_processes,
+                "effective_batch_size": actual_ebs,
                 "max_epochs": config.stage1b_max_epochs,
                 "max_chunks": K_max,
                 "min_chunks": K_min,
@@ -616,10 +642,11 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
         logger.info(f"Config: {config}")
         logger.info(f"Devices: {accelerator.num_processes}")
         logger.info(f"per_gpu_batch_size={per_gpu_bs}, gradient_accumulation_steps={accum_steps}")
+        logger.info(f"LR scaling: base_lr={base_lr:.2e} * (ebs={actual_ebs}/target={config.target_effective_batch_size}) = {scaled_lr:.2e}")
 
     # Optimizer
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable_params, lr=config.stage1_lr, weight_decay=config.stage1_weight_decay)
+    optimizer = AdamW(trainable_params, lr=scaled_lr, weight_decay=config.stage1_weight_decay)
 
     # Data loaders
     tokenizer = model.decoder.tokenizer
@@ -656,7 +683,7 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
     total_steps = steps_per_epoch * max_epochs
     warmup_steps = int(total_steps * config.stage1_warmup_ratio)
     warmup_scheduler = LinearLR(optimizer, start_factor=0.01, total_iters=warmup_steps)
-    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=config.stage1_lr * 0.01)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=scaled_lr * 0.01)
     scheduler = SequentialLR(optimizer, [warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
     if accelerator.is_main_process:
@@ -832,9 +859,13 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
     # Resolve batch parameters
     rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    per_gpu_bs, accum_steps = _resolve_batch_params(
+    per_gpu_bs, accum_steps, actual_ebs = _resolve_batch_params(
         model, config, stage="2", world_size=world_size, rank=rank,
     )
+
+    # Scale LR linearly with actual EBS
+    base_lr = config.stage2_lr
+    scaled_lr = base_lr * (actual_ebs / config.target_effective_batch_size)
 
     accelerator = Accelerator(
         gradient_accumulation_steps=accum_steps,
@@ -854,7 +885,7 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
                 f"_M{config.num_memory_tokens}"
                 f"_L{config.num_process_layers}"
                 f"_D{config.hidden_dim}"
-                f"_lr{config.stage2_lr}"
+                f"_lr{scaled_lr}"
                 f"_bs{per_gpu_bs}x{accum_steps}"
                 f"_ep{config.stage2_max_epochs}"
             ),
@@ -867,11 +898,12 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
                 "hidden_dim": config.hidden_dim,
                 "num_memory_tokens": config.num_memory_tokens,
                 "num_process_layers": config.num_process_layers,
-                "lr": config.stage2_lr,
+                "base_lr": base_lr,
+                "scaled_lr": scaled_lr,
                 "batch_size": per_gpu_bs,
                 "accum_steps": accum_steps,
                 "world_size": accelerator.num_processes,
-                "effective_batch_size": per_gpu_bs * accum_steps * accelerator.num_processes,
+                "effective_batch_size": actual_ebs,
                 "max_epochs": config.stage2_max_epochs,
                 "max_context_len": config.stage2_max_context_len,
                 "max_prompt_len": config.stage2_max_prompt_len,
@@ -884,10 +916,11 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         logger.info(f"Config: {config}")
         logger.info(f"Devices: {accelerator.num_processes}")
         logger.info(f"per_gpu_batch_size={per_gpu_bs}, gradient_accumulation_steps={accum_steps}")
+        logger.info(f"LR scaling: base_lr={base_lr:.2e} * (ebs={actual_ebs}/target={config.target_effective_batch_size}) = {scaled_lr:.2e}")
 
     # Optimizer
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable_params, lr=config.stage2_lr, weight_decay=config.stage2_weight_decay)
+    optimizer = AdamW(trainable_params, lr=scaled_lr, weight_decay=config.stage2_weight_decay)
 
     # Data loaders
     tokenizer = model.decoder.tokenizer
@@ -921,7 +954,7 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
     total_steps = steps_per_epoch * config.stage2_max_epochs
     warmup_steps = int(total_steps * config.stage2_warmup_ratio)
     warmup_scheduler = LinearLR(optimizer, start_factor=0.01, total_iters=warmup_steps)
-    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=config.stage2_lr * 0.01)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=scaled_lr * 0.01)
     scheduler = SequentialLR(optimizer, [warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
 
     if accelerator.is_main_process:

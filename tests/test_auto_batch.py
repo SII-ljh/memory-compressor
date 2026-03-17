@@ -48,13 +48,14 @@ def test_compute_accum_exact_division():
     print(f"[PASS] test_compute_accum_exact_division: accum={accum}, actual_ebs={actual}")
 
 
-def test_compute_accum_rounds_up():
-    """Target EBS does not divide evenly — should round up."""
+def test_compute_accum_rounds_down():
+    """Target EBS does not divide evenly — should round down to not exceed target."""
     accum, actual = compute_accumulation_steps(per_gpu_batch_size=3, num_gpus=8, target_ebs=256)
-    # 3 * 8 = 24 per step, ceil(256/24) = 11, actual = 264
-    assert accum == 11, f"Expected 11, got {accum}"
-    assert actual == 264, f"Expected 264, got {actual}"
-    print(f"[PASS] test_compute_accum_rounds_up: accum={accum}, actual_ebs={actual}")
+    # 3 * 8 = 24 per step, floor(256/24) = 10, actual = 240 <= 256
+    assert accum == 10, f"Expected 10, got {accum}"
+    assert actual == 240, f"Expected 240, got {actual}"
+    assert actual <= 256, f"actual_ebs {actual} exceeds target 256"
+    print(f"[PASS] test_compute_accum_rounds_down: accum={accum}, actual_ebs={actual}")
 
 
 def test_compute_accum_single_gpu():
@@ -74,7 +75,12 @@ def test_compute_accum_large_bs():
 
 
 def test_compute_accum_large_bs_over_target():
-    """Per-step total > target — accum should still be 1."""
+    """Per-step total > target — accum should be 1, actual_ebs = per_step_total.
+
+    Note: the caller (_resolve_batch_params) is responsible for capping
+    per_gpu_bs before calling this function. If per_step_total still
+    exceeds target, accum_steps=1 is the minimum.
+    """
     accum, actual = compute_accumulation_steps(per_gpu_batch_size=64, num_gpus=8, target_ebs=256)
     assert accum == 1, f"Expected 1, got {accum}"
     assert actual == 512, f"Expected 512, got {actual}"
@@ -153,7 +159,7 @@ def test_dummy_batch_values():
 if __name__ == "__main__":
     # Arithmetic tests (no GPU needed)
     test_compute_accum_exact_division()
-    test_compute_accum_rounds_up()
+    test_compute_accum_rounds_down()
     test_compute_accum_single_gpu()
     test_compute_accum_large_bs()
     test_compute_accum_large_bs_over_target()
