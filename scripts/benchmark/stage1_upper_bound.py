@@ -108,8 +108,9 @@ def collate_fn(batch):
 def evaluate_direct_ntp(model, dataloader, device):
     """Evaluate Qwen3 direct NTP, loss on continuation tokens only.
 
-    Uses HuggingFace's built-in labels mechanism (with -100 masking)
-    instead of manually reshaping logits, which avoids OOM on large vocab.
+    Forward WITHOUT labels to avoid HF's internal full-vocab cross_entropy
+    which OOMs at large batch sizes. Instead, extract logits only at
+    continuation positions and compute loss on that smaller tensor.
     """
     model.eval()
     total_loss = 0.0
@@ -129,15 +130,39 @@ def evaluate_direct_ntp(model, dataloader, device):
             if seq_len > sp:
                 labels[i, sp:seq_len] = input_ids[i, sp:seq_len]
 
+        # Forward WITHOUT labels — avoids the huge internal cross_entropy
         outputs = model(
             input_ids=input_ids, attention_mask=attention_mask,
-            labels=labels, use_cache=False,
+            use_cache=False,
         )
+        logits = outputs.logits  # (B, T, V) in bfloat16
 
-        # HuggingFace internally shifts: loss is over labels[:, 1:] != -100
-        n_tokens = (labels[:, 1:] != -100).sum().item()
-        total_loss += outputs.loss.item() * n_tokens
+        # Causal LM shift: predict token t+1 from position t
+        shift_logits = logits[:, :-1, :]
+        shift_labels = labels[:, 1:]
+
+        # Select only valid (continuation) token positions
+        valid_mask = shift_labels != -100
+        n_tokens = valid_mask.sum().item()
+        if n_tokens == 0:
+            del logits, outputs
+            continue
+
+        valid_logits = shift_logits[valid_mask]   # (N_valid, V)
+        valid_labels = shift_labels[valid_mask]    # (N_valid,)
+
+        # Free large tensors before the float32 cross_entropy
+        del logits, shift_logits, outputs
+
+        loss = nn.functional.cross_entropy(
+            valid_logits, valid_labels, reduction="sum",
+        )
+        total_loss += loss.item()
         total_tokens += n_tokens
+
+        del valid_logits, valid_labels, loss
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     avg_loss = total_loss / max(total_tokens, 1)
     ppl = math.exp(min(avg_loss, 20))
@@ -145,10 +170,10 @@ def evaluate_direct_ntp(model, dataloader, device):
 
 
 def _probe_max_batch_size(model, max_seq_len, device, upper_bound=256):
-    """Binary search for max batch size (inference + loss) that fits in GPU memory.
+    """Binary search for max batch size that fits in GPU memory.
 
-    Uses max_seq_len as worst-case sequence length, so the result is already
-    conservative — no additional safety margin needed.
+    Probes forward pass WITHOUT labels (matching evaluate_direct_ntp),
+    then applies 0.85x safety margin for the cross_entropy computation.
     """
     lo, hi = 1, upper_bound
     best = 1
@@ -159,10 +184,8 @@ def _probe_max_batch_size(model, max_seq_len, device, upper_bound=256):
         try:
             dummy_ids = torch.ones(mid, max_seq_len, dtype=torch.long, device=device)
             dummy_mask = torch.ones(mid, max_seq_len, dtype=torch.long, device=device)
-            dummy_labels = torch.ones(mid, max_seq_len, dtype=torch.long, device=device)
             with torch.no_grad():
-                model(input_ids=dummy_ids, attention_mask=dummy_mask,
-                      labels=dummy_labels, use_cache=False)
+                model(input_ids=dummy_ids, attention_mask=dummy_mask, use_cache=False)
             best = mid
             lo = mid + 1
             logger.info(f"  bs={mid} OK (best={best})")
@@ -171,8 +194,10 @@ def _probe_max_batch_size(model, max_seq_len, device, upper_bound=256):
             logger.info(f"  bs={mid} OOM (shrink to {hi})")
         finally:
             torch.cuda.empty_cache()
-    logger.info(f"Auto batch probe done: max_bs={best}")
-    return best
+    # Safety margin for cross_entropy on valid tokens
+    safe = max(1, int(best * 0.85))
+    logger.info(f"Auto batch probe done: max_bs={best}, safe={safe}")
+    return safe
 
 
 def main():
