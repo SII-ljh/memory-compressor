@@ -405,7 +405,8 @@ def train_stage1a(config: QCPCConfig, resume_path: str | None = None):
     if resume_path:
         logger.info(f"Resuming from {resume_path}")
         ckpt = torch.load(resume_path, map_location="cpu")
-        model.perceiver.load_state_dict(ckpt["model"], strict=False)
+        unwrapped = accelerator.unwrap_model(model)
+        unwrapped.perceiver.load_state_dict(ckpt["model"], strict=False)
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt.get("epoch", 0)
@@ -675,8 +676,9 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
     if s1b_ckpt_path:
         logger.info(f"Resuming stage1b from {s1b_ckpt_path}")
         ckpt = torch.load(s1b_ckpt_path, map_location="cpu")
-        model.perceiver.load_state_dict(ckpt["model"], strict=False)
-        model.set_stage(1)
+        unwrapped = accelerator.unwrap_model(model)
+        unwrapped.perceiver.load_state_dict(ckpt["model"], strict=False)
+        unwrapped.set_stage(1)
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt.get("epoch", 0)
@@ -939,8 +941,9 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
     if s2_ckpt_path:
         logger.info(f"Resuming stage2 from {s2_ckpt_path}")
         ckpt = torch.load(s2_ckpt_path, map_location="cpu")
-        model.perceiver.load_state_dict(ckpt["model"], strict=False)
-        model.set_stage(2)
+        unwrapped = accelerator.unwrap_model(model)
+        unwrapped.perceiver.load_state_dict(ckpt["model"], strict=False)
+        unwrapped.set_stage(2)
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt.get("epoch", 0)
