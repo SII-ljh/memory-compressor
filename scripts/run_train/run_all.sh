@@ -9,6 +9,7 @@
 # Usage:
 #   bash scripts/run_train/run_all.sh                                  # all experiments, stage 1+2
 #   bash scripts/run_train/run_all.sh --stage 1                        # all experiments, stage 1 only
+#   bash scripts/run_train/run_all.sh --stage 1a                       # stage 1a only (parallel on 8 GPUs)
 #   bash scripts/run_train/run_all.sh --exp 06b_m64,06b_m128           # only these experiments
 #   bash scripts/run_train/run_all.sh --stage 1 --exp 06b_m64,4b_m128 # stage 1, selected experiments
 #
@@ -66,6 +67,15 @@ for exp in "${EXPS[@]}"; do
 done
 
 TOTAL=${#EXPS[@]}
+
+# ─── Stage 1a: Parallel warmup on 8x H200 ─────────────────────────
+if [[ "${STAGE}" == "1a" ]]; then
+    EXP_ARGS=""
+    if [[ -n "${EXPERIMENTS}" ]]; then
+        EXP_ARGS="--exp ${EXPERIMENTS}"
+    fi
+    exec bash "$SCRIPT_DIR/run_all_stage1a.sh" ${EXP_ARGS}
+fi
 
 # ─── Stage 1: Pretrain ──────────────────────────────────────────────
 if [[ "${STAGE}" == "all" || "${STAGE}" == "1" ]]; then
