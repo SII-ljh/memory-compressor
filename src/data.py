@@ -1,11 +1,23 @@
 """Data loaders for Stage 1 (pretrain) and Stage 2 (QA finetune)."""
 
 import json
+import logging
+import os
+import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
+
+logger = logging.getLogger(__name__)
+
+
+def _token_cache_path(data_path: str, sample_len: int) -> Path:
+    """Cache path for pre-tokenized data: {dir}/{stem}.tokens_{sample_len}.npy"""
+    p = Path(data_path)
+    return p.parent / f"{p.stem}.tokens_{sample_len}.npy"
 
 
 class PretrainDataset(Dataset):
@@ -30,6 +42,20 @@ class PretrainDataset(Dataset):
         self.max_cont_len = max_cont_len
         self.sample_len = sample_len
 
+        # Check for pre-tokenized cache
+        cache = _token_cache_path(data_path, sample_len)
+        if cache.exists():
+            t0 = time.time()
+            self.samples = np.load(str(cache), mmap_mode="r")
+            logger.info(
+                f"Loaded {len(self.samples):,} cached samples "
+                f"from {cache.name} ({time.time() - t0:.1f}s)"
+            )
+            return
+
+        logger.info(f"Tokenizing {Path(data_path).name} (sample_len={sample_len})...")
+        t0 = time.time()
+
         # Suppress "Token indices sequence length is longer than the specified
         # maximum sequence length" warning — we segment into fixed-length
         # samples ourselves, so the tokenizer's model_max_length is irrelevant.
@@ -37,7 +63,7 @@ class PretrainDataset(Dataset):
         tokenizer.model_max_length = int(1e18)
 
         # Pre-chunk: tokenize all texts and slice into fixed-length segments
-        self.samples = []
+        samples = []
         with open(data_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -50,9 +76,19 @@ class PretrainDataset(Dataset):
                 tokens = tokenizer.encode(rec["text"], add_special_tokens=False)
                 # Slice into non-overlapping segments of sample_len, drop remainder
                 for start in range(0, len(tokens) - sample_len + 1, sample_len):
-                    self.samples.append(tokens[start:start + sample_len])
+                    samples.append(tokens[start:start + sample_len])
 
         tokenizer.model_max_length = _orig_max_len
+        self.samples = np.array(samples, dtype=np.int32)
+        logger.info(
+            f"Tokenized {len(self.samples):,} samples in {time.time() - t0:.1f}s"
+        )
+
+        # Auto-save cache (only rank 0 in distributed)
+        rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", 0)))
+        if rank == 0:
+            np.save(str(cache), self.samples)
+            logger.info(f"Saved token cache: {cache.name} ({self.samples.nbytes / 1e6:.1f} MB)")
 
     def __len__(self):
         return len(self.samples)
@@ -98,13 +134,28 @@ class PretrainMultiChunkDataset(Dataset):
         self.chunk_len = chunk_len
         self.cont_len = cont_len
 
+        sample_len = max_chunks * chunk_len + cont_len
+
+        # Check for pre-tokenized cache
+        cache = _token_cache_path(data_path, sample_len)
+        if cache.exists():
+            t0 = time.time()
+            self.samples = np.load(str(cache), mmap_mode="r")
+            logger.info(
+                f"Loaded {len(self.samples):,} cached samples "
+                f"from {cache.name} ({time.time() - t0:.1f}s)"
+            )
+            return
+
+        logger.info(f"Tokenizing {Path(data_path).name} (sample_len={sample_len})...")
+        t0 = time.time()
+
         # Suppress tokenizer max length warning (same as PretrainDataset)
         _orig_max_len = tokenizer.model_max_length
         tokenizer.model_max_length = int(1e18)
 
         # Pre-chunk: slice long texts into fixed-length samples
-        sample_len = max_chunks * chunk_len + cont_len  # 512*4+128=2176
-        self.samples = []
+        samples = []
         with open(data_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -117,9 +168,19 @@ class PretrainMultiChunkDataset(Dataset):
                 tokens = tokenizer.encode(rec["text"], add_special_tokens=False)
                 # Slice into non-overlapping segments of sample_len, drop remainder
                 for start in range(0, len(tokens) - sample_len + 1, sample_len):
-                    self.samples.append(tokens[start:start + sample_len])
+                    samples.append(tokens[start:start + sample_len])
 
         tokenizer.model_max_length = _orig_max_len
+        self.samples = np.array(samples, dtype=np.int32)
+        logger.info(
+            f"Tokenized {len(self.samples):,} samples in {time.time() - t0:.1f}s"
+        )
+
+        # Auto-save cache (only rank 0 in distributed)
+        rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", 0)))
+        if rank == 0:
+            np.save(str(cache), self.samples)
+            logger.info(f"Saved token cache: {cache.name} ({self.samples.nbytes / 1e6:.1f} MB)")
 
     def __len__(self):
         return len(self.samples)

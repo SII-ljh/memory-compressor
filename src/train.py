@@ -368,6 +368,8 @@ def train_stage1a(config: QCPCConfig, resume_path: str | None = None):
     optimizer = AdamW(trainable_params, lr=scaled_lr, weight_decay=config.stage1_weight_decay)
 
     # Data loaders
+    if accelerator.is_main_process:
+        logger.info("Loading data...")
     tokenizer = model.decoder.tokenizer
     train_loader = create_pretrain_dataloader(
         data_path=config.stage1a_train_data_path,
@@ -649,6 +651,8 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
     optimizer = AdamW(trainable_params, lr=scaled_lr, weight_decay=config.stage1_weight_decay)
 
     # Data loaders
+    if accelerator.is_main_process:
+        logger.info("Loading data...")
     tokenizer = model.decoder.tokenizer
     train_loader = create_multi_chunk_dataloader(
         data_path=config.stage1b_train_data_path,
@@ -923,6 +927,8 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
     optimizer = AdamW(trainable_params, lr=scaled_lr, weight_decay=config.stage2_weight_decay)
 
     # Data loaders
+    if accelerator.is_main_process:
+        logger.info("Loading data...")
     tokenizer = model.decoder.tokenizer
     train_loader = create_qa_dataloader(
         data_path=config.sft_train_data_path,
