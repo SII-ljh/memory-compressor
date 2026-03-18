@@ -296,9 +296,9 @@ def collate_multi_chunk_fn(batch: list[dict]) -> dict:
             chunk_mask[i, k] = 1  # all positions valid for real chunks
 
     # target_ids: (B, cont_len) — fixed size, no padding needed
-    target_ids = torch.tensor(
-        [item["target_ids"] for item in batch], dtype=torch.long
-    )
+    target_ids = torch.from_numpy(
+        np.stack([item["target_ids"] for item in batch])
+    ).long()
     target_mask = torch.ones_like(target_ids)
 
     return {
