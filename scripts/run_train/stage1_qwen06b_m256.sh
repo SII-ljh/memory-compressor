@@ -7,7 +7,7 @@ NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l | xargs)}
 [[ ${NUM_GPUS} -lt 1 ]] && NUM_GPUS=1
 
 accelerate launch --num_processes "${NUM_GPUS}" --multi_gpu \
-  src/train.py --config config/default.yaml --stage 1 \
+  src/train.py --config config/default.yaml --stage "${TRAIN_STAGE:-1}" \
   --override \
     use_decoupled_rope=false \
     use_prompt_bias=false \

@@ -10,6 +10,8 @@
 #   bash scripts/run_train/run_all.sh                                  # all experiments, stage 1+2
 #   bash scripts/run_train/run_all.sh --stage 1                        # all experiments, stage 1 only
 #   bash scripts/run_train/run_all.sh --stage 1a                       # stage 1a only (parallel on 8 GPUs)
+#   bash scripts/run_train/run_all.sh --stage 1b                       # stage 1b only (multi-chunk)
+#   bash scripts/run_train/run_all.sh --stage 1b --exp 06b_m64         # stage 1b, single experiment
 #   bash scripts/run_train/run_all.sh --exp 06b_m64,06b_m128           # only these experiments
 #   bash scripts/run_train/run_all.sh --stage 1 --exp 06b_m64,4b_m128 # stage 1, selected experiments
 #
@@ -75,6 +77,24 @@ if [[ "${STAGE}" == "1a" ]]; then
         EXP_ARGS="--exp ${EXPERIMENTS}"
     fi
     exec bash "$SCRIPT_DIR/run_all_stage1a.sh" ${EXP_ARGS}
+fi
+
+# ─── Stage 1b: Multi-chunk only ────────────────────────────────────
+if [[ "${STAGE}" == "1b" ]]; then
+    echo "=========================================="
+    echo "  QCPC Stage-1b Multi-chunk (${TOTAL} experiments)"
+    echo "=========================================="
+
+    for i in "${!EXPS[@]}"; do
+        exp="${EXPS[$i]}"
+        echo ""
+        echo "[S1b $((i+1))/${TOTAL}] ${LABELS[$exp]}"
+        TRAIN_STAGE=1b bash "$SCRIPT_DIR/stage1_${SCRIPTS[$exp]}.sh"
+    done
+
+    echo ""
+    echo "  Stage 1b all done!"
+    echo "=========================================="
 fi
 
 # ─── Stage 1: Pretrain ──────────────────────────────────────────────
