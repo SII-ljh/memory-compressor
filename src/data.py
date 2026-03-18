@@ -207,9 +207,11 @@ class PretrainMultiChunkDataset(Dataset):
 
 
 class QADataset(Dataset):
-    """Stage 2: QA finetuning dataset.
+    """Stage 2: QA finetuning dataset with multi-chunk context compression.
 
     Reads JSON array with {"context": str, "question": str, "answer": str} format.
+    Context is split into fixed-length chunks (matching stage 1 compression window)
+    so that each chunk is compressed independently and memory tokens are concatenated.
     """
 
     def __init__(
@@ -217,11 +219,13 @@ class QADataset(Dataset):
         data_path: str,
         tokenizer: AutoTokenizer,
         max_context_len: int = 4096,
+        chunk_len: int = 512,
         max_prompt_len: int = 128,
         max_answer_len: int = 256,
     ):
         self.tokenizer = tokenizer
         self.max_context_len = max_context_len
+        self.chunk_len = chunk_len
         self.max_prompt_len = max_prompt_len
         self.max_answer_len = max_answer_len
 
@@ -244,8 +248,29 @@ class QADataset(Dataset):
             rec["answer"], add_special_tokens=False, max_length=self.max_answer_len, truncation=True
         )
 
+        # Split context into fixed-length chunks
+        chunk_ids_list = []
+        chunk_masks_list = []
+        for start in range(0, len(context_ids), self.chunk_len):
+            end = min(start + self.chunk_len, len(context_ids))
+            chunk = context_ids[start:end]
+            real_len = len(chunk)
+            # Pad last chunk to chunk_len
+            if real_len < self.chunk_len:
+                chunk = chunk + [0] * (self.chunk_len - real_len)
+            mask = [1] * real_len + [0] * (self.chunk_len - real_len)
+            chunk_ids_list.append(chunk)
+            chunk_masks_list.append(mask)
+
+        # Edge case: empty context → single empty chunk
+        if len(chunk_ids_list) == 0:
+            chunk_ids_list.append([0] * self.chunk_len)
+            chunk_masks_list.append([0] * self.chunk_len)
+
         return {
-            "context_ids": context_ids,
+            "chunk_ids": chunk_ids_list,
+            "chunk_masks": chunk_masks_list,
+            "num_chunks": len(chunk_ids_list),
             "prompt_ids": prompt_ids,
             "target_ids": answer_ids,
         }
@@ -270,6 +295,43 @@ def collate_fn(batch: list[dict]) -> dict:
             padded[i, :seq.shape[0]] = seq
             masks[i, :seq.shape[0]] = 1
 
+        result[key] = padded
+        result[key.replace("_ids", "_mask")] = masks
+
+    return result
+
+
+def collate_qa_chunk_fn(batch: list[dict]) -> dict:
+    """Collate for QADataset with multi-chunk context.
+
+    Pads chunk dimension to max K in batch (padded chunks get all-zero masks).
+    Pads prompt_ids and target_ids to max length in batch.
+    """
+    B = len(batch)
+    chunk_len = len(batch[0]["chunk_ids"][0])
+    max_K = max(item["num_chunks"] for item in batch)
+
+    # Chunk tensors: (B, max_K, chunk_len)
+    chunk_ids = torch.zeros(B, max_K, chunk_len, dtype=torch.long)
+    chunk_mask = torch.zeros(B, max_K, chunk_len, dtype=torch.long)
+
+    for i, item in enumerate(batch):
+        K_i = item["num_chunks"]
+        for k in range(K_i):
+            chunk_ids[i, k] = torch.tensor(item["chunk_ids"][k], dtype=torch.long)
+            chunk_mask[i, k] = torch.tensor(item["chunk_masks"][k], dtype=torch.long)
+
+    result = {"chunk_ids": chunk_ids, "chunk_mask": chunk_mask}
+
+    # Pad prompt_ids and target_ids (variable length)
+    for key in ["prompt_ids", "target_ids"]:
+        sequences = [torch.tensor(item[key], dtype=torch.long) for item in batch]
+        max_len = max(s.shape[0] for s in sequences)
+        padded = torch.zeros(B, max_len, dtype=torch.long)
+        masks = torch.zeros(B, max_len, dtype=torch.long)
+        for i, seq in enumerate(sequences):
+            padded[i, :seq.shape[0]] = seq
+            masks[i, :seq.shape[0]] = 1
         result[key] = padded
         result[key.replace("_ids", "_mask")] = masks
 
@@ -370,6 +432,7 @@ def create_qa_dataloader(
     tokenizer: AutoTokenizer,
     batch_size: int,
     max_context_len: int = 4096,
+    chunk_len: int = 512,
     max_prompt_len: int = 128,
     max_answer_len: int = 256,
     num_workers: int = 4,
@@ -377,7 +440,7 @@ def create_qa_dataloader(
     max_samples: int | None = None,
     drop_last: bool = True,
 ) -> DataLoader:
-    dataset = QADataset(data_path, tokenizer, max_context_len, max_prompt_len, max_answer_len)
+    dataset = QADataset(data_path, tokenizer, max_context_len, chunk_len, max_prompt_len, max_answer_len)
     if max_samples is not None and len(dataset) > max_samples:
         dataset = torch.utils.data.Subset(dataset, range(max_samples))
     return DataLoader(
@@ -385,7 +448,7 @@ def create_qa_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        collate_fn=collate_fn,
+        collate_fn=collate_qa_chunk_fn,
         pin_memory=True,
         drop_last=drop_last,
     )

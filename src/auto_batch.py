@@ -48,12 +48,15 @@ def _make_dummy_batch(batch_size: int, config: QCPCConfig, stage: str, device: t
             "target_mask": torch.ones(batch_size, tgt_len, dtype=torch.long, device=device),
         }
     else:  # stage == "2"
-        ctx_len = config.stage2_max_context_len
+        # Worst case: max context length → max number of chunks
+        import math as _math
+        K = _math.ceil(config.stage2_max_context_len / config.stage2_chunk_len)
+        N = config.stage2_chunk_len
         prompt_len = config.stage2_max_prompt_len
         ans_len = config.stage2_max_answer_len
         batch = {
-            "context_ids": torch.ones(batch_size, ctx_len, dtype=torch.long, device=device),
-            "context_mask": torch.ones(batch_size, ctx_len, dtype=torch.long, device=device),
+            "chunk_ids": torch.ones(batch_size, K, N, dtype=torch.long, device=device),
+            "chunk_mask": torch.ones(batch_size, K, N, dtype=torch.long, device=device),
             "prompt_ids": torch.ones(batch_size, prompt_len, dtype=torch.long, device=device),
             "prompt_mask": torch.ones(batch_size, prompt_len, dtype=torch.long, device=device),
             "target_ids": torch.ones(batch_size, ans_len, dtype=torch.long, device=device),

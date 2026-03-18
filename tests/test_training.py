@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.config import QCPCConfig
 from src.model import QCPC
 from src.data import (
-    PretrainDataset, QADataset, collate_fn,
+    PretrainDataset, QADataset, collate_fn, collate_qa_chunk_fn,
     create_pretrain_dataloader, create_qa_dataloader,
 )
 from transformers import AutoTokenizer
@@ -87,21 +87,25 @@ def test_qa_dataset():
         json.dump(records, f)
         tmp_path = f.name
 
-    ds = QADataset(tmp_path, tokenizer, max_context_len=128, max_prompt_len=32, max_answer_len=32)
+    ds = QADataset(tmp_path, tokenizer, max_context_len=128, chunk_len=64, max_prompt_len=32, max_answer_len=32)
     assert len(ds) == 2
 
     item = ds[0]
-    assert "context_ids" in item
+    assert "chunk_ids" in item
+    assert "chunk_masks" in item
+    assert "num_chunks" in item
     assert "prompt_ids" in item
     assert "target_ids" in item
 
     batch = [ds[i] for i in range(2)]
-    collated = collate_fn(batch)
+    collated = collate_qa_chunk_fn(batch)
+    assert "chunk_ids" in collated
+    assert "chunk_mask" in collated
     assert "prompt_ids" in collated
     assert "prompt_mask" in collated
 
     Path(tmp_path).unlink()
-    print(f"[PASS] test_qa_dataset: ctx={len(item['context_ids'])}, prompt={len(item['prompt_ids'])}, tgt={len(item['target_ids'])}")
+    print(f"[PASS] test_qa_dataset: chunks={item['num_chunks']}, prompt={len(item['prompt_ids'])}, tgt={len(item['target_ids'])}")
 
 
 def test_stage1_training_step():
@@ -157,14 +161,14 @@ def test_stage2_training_step():
         json.dump(records, f)
         tmp_path = f.name
 
-    ds = QADataset(tmp_path, tokenizer, max_context_len=64, max_prompt_len=32, max_answer_len=32)
+    ds = QADataset(tmp_path, tokenizer, max_context_len=64, chunk_len=32, max_prompt_len=32, max_answer_len=32)
     batch_items = [ds[i] for i in range(2)]
-    batch = collate_fn(batch_items)
+    batch = collate_qa_chunk_fn(batch_items)
 
     # Forward
     result = model(
-        context_ids=batch["context_ids"],
-        context_mask=batch["context_mask"],
+        chunk_ids=batch["chunk_ids"],
+        chunk_mask=batch["chunk_mask"],
         prompt_ids=batch["prompt_ids"],
         prompt_mask=batch["prompt_mask"],
         target_ids=batch["target_ids"],

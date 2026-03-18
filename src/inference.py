@@ -79,8 +79,11 @@ class QCPCInference:
         question: str | None = None,
         max_context_len: int | None = None,
         max_prompt_len: int | None = None,
-    ) -> torch.Tensor:
-        """Compress context into memory tokens.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compress context into memory tokens using multi-chunk splitting.
+
+        Long contexts are split into chunk_len-sized chunks, each compressed
+        independently, and memory tokens are concatenated.
 
         Args:
             context: Long text to compress
@@ -89,38 +92,77 @@ class QCPCInference:
             max_prompt_len: Override max prompt length
 
         Returns:
-            memory_tokens: (1, M, D) compressed representation
+            (memory_tokens, memory_mask):
+                memory_tokens: (1, K*M, D) compressed representation
+                memory_mask: (1, K*M) validity mask
         """
         max_ctx = max_context_len or self.config.stage2_max_context_len
         max_pmt = max_prompt_len or self.config.stage2_max_prompt_len
+        chunk_len = self.config.stage2_chunk_len
+        M = self.config.num_memory_tokens
 
         # Tokenize context
         ctx_ids = self.tokenizer.encode(
             context, add_special_tokens=False, max_length=max_ctx, truncation=True
         )
-        ctx_tensor = torch.tensor([ctx_ids], device=self.device)
 
-        # Tokenize question (optional)
-        prompt_ids = None
+        # Split into chunks
+        chunks = []
+        chunk_masks = []
+        for start in range(0, len(ctx_ids), chunk_len):
+            end = min(start + chunk_len, len(ctx_ids))
+            chunk = ctx_ids[start:end]
+            real_len = len(chunk)
+            if real_len < chunk_len:
+                chunk = chunk + [0] * (chunk_len - real_len)
+            mask = [1] * real_len + [0] * (chunk_len - real_len)
+            chunks.append(chunk)
+            chunk_masks.append(mask)
+
+        if len(chunks) == 0:
+            chunks.append([0] * chunk_len)
+            chunk_masks.append([0] * chunk_len)
+
+        K = len(chunks)
+        # (1, K, chunk_len)
+        chunk_ids = torch.tensor([chunks], device=self.device)
+        chunk_mask = torch.tensor([chunk_masks], device=self.device)
+
+        # Flatten: (K, chunk_len)
+        flat_ids = chunk_ids.reshape(K, chunk_len)
+        flat_mask = chunk_mask.reshape(K, chunk_len)
+
+        # Embed all chunks
+        flat_embeds = self.model.embedding(flat_ids)  # (K, chunk_len, D)
+
+        # Prompt bias (replicate for each chunk)
+        flat_prompt_embeds = None
+        flat_prompt_mask = None
         if question and self.config.use_prompt_bias:
             pmt_ids = self.tokenizer.encode(
                 question, add_special_tokens=False, max_length=max_pmt, truncation=True
             )
-            prompt_ids = torch.tensor([pmt_ids], device=self.device)
+            prompt_tensor = torch.tensor([pmt_ids], device=self.device)  # (1, L)
+            prompt_embeds = self.model.embedding(prompt_tensor)  # (1, L, D)
+            flat_prompt_embeds = prompt_embeds.expand(K, -1, -1)  # (K, L, D)
+            flat_prompt_mask = torch.ones(K, len(pmt_ids), device=self.device)
 
-        # Embed
-        ctx_embeds = self.model.embedding(ctx_tensor)
-        prompt_embeds = None
-        if prompt_ids is not None:
-            prompt_embeds = self.model.embedding(prompt_ids)
+        # Compress each chunk
+        flat_memory = self.model.perceiver(
+            text_embeds=flat_embeds,
+            text_mask=flat_mask,
+            prompt_embeds=flat_prompt_embeds,
+            prompt_mask=flat_prompt_mask,
+        )  # (K, M, D)
 
-        # Compress
-        memory_tokens = self.model.perceiver(
-            text_embeds=ctx_embeds,
-            prompt_embeds=prompt_embeds if self.config.use_prompt_bias else None,
-        )
+        # Reshape to (1, K*M, D)
+        memory_tokens = flat_memory.reshape(1, K * M, -1)
 
-        return memory_tokens
+        # Build memory mask
+        chunk_valid = chunk_mask.any(dim=-1)  # (1, K)
+        memory_mask = chunk_valid.unsqueeze(-1).expand(-1, -1, M).reshape(1, K * M).float()
+
+        return memory_tokens, memory_mask
 
     @torch.no_grad()
     def generate(
@@ -143,8 +185,8 @@ class QCPCInference:
         Returns:
             Generated text string
         """
-        # Compress context
-        memory_tokens = self.compress(context, question)
+        # Compress context (multi-chunk)
+        memory_tokens, memory_mask = self.compress(context, question)
 
         # Prepare prompt IDs for decoder
         prompt_ids = None
@@ -158,28 +200,34 @@ class QCPCInference:
         # Build initial input: [<MEM>, memory, </MEM>, prompt]
         B = 1
         parts = []
+        mask_parts = []
 
         # <MEM>
         mem_start = self.model.decoder._make_special_embed(
             self.model.decoder.mem_start_id, B, self.device
         )
         parts.append(mem_start)
+        mask_parts.append(torch.ones(B, 1, device=self.device))
 
-        # Memory tokens
+        # Memory tokens (with mask for padded chunks)
         parts.append(memory_tokens)
+        mask_parts.append(memory_mask)
 
         # </MEM>
         mem_end = self.model.decoder._make_special_embed(
             self.model.decoder.mem_end_id, B, self.device
         )
         parts.append(mem_end)
+        mask_parts.append(torch.ones(B, 1, device=self.device))
 
         # Prompt
         if prompt_ids is not None:
             p_emb = self.model.decoder.embed_tokens(prompt_ids)
             parts.append(p_emb)
+            mask_parts.append(torch.ones(B, prompt_ids.shape[1], device=self.device))
 
         inputs_embeds = torch.cat(parts, dim=1)  # (1, seq_len, D)
+        attention_mask = torch.cat(mask_parts, dim=1)  # (1, seq_len)
 
         # Autoregressive generation
         generated_ids = []
@@ -189,6 +237,7 @@ class QCPCInference:
             if past_key_values is None:
                 outputs = self.model.decoder.lm(
                     inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask,
                     use_cache=True,
                 )
             else:
@@ -196,8 +245,14 @@ class QCPCInference:
                 last_embed = self.model.decoder.embed_tokens(
                     torch.tensor([[generated_ids[-1]]], device=self.device)
                 )
+                # Extend attention mask for the new token
+                attention_mask = torch.cat([
+                    attention_mask,
+                    torch.ones(B, 1, device=self.device),
+                ], dim=1)
                 outputs = self.model.decoder.lm(
                     inputs_embeds=last_embed,
+                    attention_mask=attention_mask,
                     past_key_values=past_key_values,
                     use_cache=True,
                 )

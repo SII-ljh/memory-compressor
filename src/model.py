@@ -67,7 +67,9 @@ class QCPC(nn.Module):
         """
         if chunk_ids is not None:
             return self._forward_multi_chunk(
-                chunk_ids, chunk_mask, target_ids, target_mask
+                chunk_ids, chunk_mask,
+                prompt_ids, prompt_mask,
+                target_ids, target_mask,
             )
 
         # --- Single-chunk path ---
@@ -104,6 +106,8 @@ class QCPC(nn.Module):
         self,
         chunk_ids: torch.LongTensor,
         chunk_mask: torch.Tensor | None,
+        prompt_ids: torch.LongTensor | None,
+        prompt_mask: torch.Tensor | None,
         target_ids: torch.LongTensor | None,
         target_mask: torch.Tensor | None,
     ) -> dict:
@@ -112,10 +116,17 @@ class QCPC(nn.Module):
         K may vary per sample in a batch (padded chunks have all-zero masks).
         Memory tokens from padded chunks are masked out in the decoder.
 
+        Supports two modes:
+        - Stage 1b (pretrain): prompt_ids is None, decoder gets only memory + target
+        - Stage 2 (QA): prompt_ids provided, each chunk gets prompt bias,
+          decoder gets memory + prompt + target
+
         Args:
             chunk_ids: (B, K, N) token IDs for K chunks (K = max in batch)
             chunk_mask: (B, K, N) attention masks (0 for padded chunks)
-            target_ids: (B, T) continuation target
+            prompt_ids: (B, L) prompt/question token IDs (optional, Stage 2)
+            prompt_mask: (B, L) prompt mask (optional, Stage 2)
+            target_ids: (B, T) continuation/answer target
             target_mask: (B, T) target mask
 
         Returns:
@@ -131,10 +142,22 @@ class QCPC(nn.Module):
         # Embed all chunks
         flat_embeds = self.embedding(flat_ids)  # (B*K, N, D)
 
+        # Prompt bias: embed prompt and replicate for each chunk
+        flat_prompt_embeds = None
+        flat_prompt_mask = None
+        if prompt_ids is not None and self.config.use_prompt_bias:
+            prompt_embeds = self.embedding(prompt_ids)  # (B, L, D)
+            # (B, L, D) → (B, K, L, D) → (B*K, L, D)
+            flat_prompt_embeds = prompt_embeds.unsqueeze(1).expand(-1, K, -1, -1).reshape(B * K, -1, prompt_embeds.shape[-1])
+            if prompt_mask is not None:
+                flat_prompt_mask = prompt_mask.unsqueeze(1).expand(-1, K, -1).reshape(B * K, -1)
+
         # Compress each chunk independently through Perceiver
         flat_memory = self.perceiver(
             text_embeds=flat_embeds,
             text_mask=flat_mask,
+            prompt_embeds=flat_prompt_embeds,
+            prompt_mask=flat_prompt_mask,
         )  # (B*K, M, D)
 
         # Reshape: concatenate K sets of M memory tokens per sample → (B, K*M, D)
@@ -146,10 +169,12 @@ class QCPC(nn.Module):
         # Expand each chunk's validity to its M memory tokens → (B, K*M)
         memory_mask = chunk_valid.unsqueeze(-1).expand(-1, -1, M).reshape(B, K * M).float()
 
-        # Decode: [<MEM>, memory_1..memory_{K*M}, </MEM>, target]
+        # Decode: [<MEM>, memory, </MEM>, prompt (if QA), target]
         decoder_result = self.decoder(
             memory_tokens=memory_tokens,
             memory_mask=memory_mask,
+            prompt_ids=prompt_ids,
+            prompt_mask=prompt_mask,
             target_ids=target_ids,
             target_mask=target_mask,
         )

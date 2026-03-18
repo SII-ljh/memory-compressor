@@ -128,20 +128,24 @@ def test_dummy_batch_stage1b_shapes():
 
 
 def test_dummy_batch_stage2_shapes():
-    """Dummy batch for stage 2 has correct shapes including prompt."""
+    """Dummy batch for stage 2 has correct shapes (multi-chunk + prompt)."""
+    import math
     config = _make_config(
         stage2_max_context_len=64,
+        stage2_chunk_len=32,
         stage2_max_prompt_len=16,
         stage2_max_answer_len=32,
     )
     batch = _make_dummy_batch(2, config, stage="2", device=torch.device("cpu"))
 
-    assert batch["context_ids"].shape == (2, 64)
-    assert batch["context_mask"].shape == (2, 64)
+    K = math.ceil(64 / 32)  # 2 chunks
+    assert batch["chunk_ids"].shape == (2, K, 32), f"Got {batch['chunk_ids'].shape}"
+    assert batch["chunk_mask"].shape == (2, K, 32), f"Got {batch['chunk_mask'].shape}"
     assert batch["prompt_ids"].shape == (2, 16), f"Got {batch['prompt_ids'].shape}"
     assert batch["prompt_mask"].shape == (2, 16)
     assert batch["target_ids"].shape == (2, 32), f"Got {batch['target_ids'].shape}"
     assert batch["target_mask"].shape == (2, 32)
+    assert "context_ids" not in batch
     print(f"[PASS] test_dummy_batch_stage2_shapes")
 
 

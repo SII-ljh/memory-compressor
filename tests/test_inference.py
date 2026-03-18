@@ -30,6 +30,7 @@ def _make_config(**kwargs):
         max_position_embeddings=128,
         use_decoupled_rope=True,
         use_prompt_bias=True,
+        stage2_chunk_len=64,
     )
     defaults.update(kwargs)
     return QCPCConfig(**defaults)
@@ -45,17 +46,21 @@ def _save_dummy_checkpoint(config):
 
 
 def test_compress():
-    """Test compression produces correct shape."""
-    cfg = _make_config()
+    """Test compression produces correct shape (multi-chunk)."""
+    cfg = _make_config(stage2_chunk_len=64)
     ckpt_path = _save_dummy_checkpoint(cfg)
     inferencer = QCPCInference(cfg, ckpt_path, device=torch.device("cpu"))
 
     context = "The quick brown fox jumps over the lazy dog. " * 50
-    memory = inferencer.compress(context, question="What does the fox do?")
-    assert memory.shape == (1, M, D), f"Expected (1, {M}, {D}), got {memory.shape}"
+    memory, memory_mask = inferencer.compress(context, question="What does the fox do?")
+    # With chunk_len=64, context will be split into K chunks → K*M memory tokens
+    K = memory.shape[1] // M
+    assert memory.shape == (1, K * M, D), f"Expected (1, {K*M}, {D}), got {memory.shape}"
+    assert memory_mask.shape == (1, K * M), f"Expected (1, {K*M}), got {memory_mask.shape}"
+    assert K >= 1
 
     Path(ckpt_path).unlink()
-    print(f"[PASS] test_compress: {memory.shape}")
+    print(f"[PASS] test_compress: {memory.shape} (K={K} chunks)")
 
 
 def test_generate():

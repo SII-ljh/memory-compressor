@@ -71,6 +71,7 @@ class QCPCConfig:
     stage2_batch_size: int = 4
     stage2_max_epochs: int = 5
     stage2_max_context_len: int = 4096
+    stage2_chunk_len: int = 512          # chunk size for context splitting (match stage1a/1b)
     stage2_max_prompt_len: int = 128     # L: prompt/question length
     stage2_max_answer_len: int = 256
     stage2_warmup_ratio: float = 0.05

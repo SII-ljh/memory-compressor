@@ -262,8 +262,8 @@ def evaluate_stage2(model, eval_loader, accelerator):
     num_batches = 0
     for batch in eval_loader:
         result = model(
-            context_ids=batch["context_ids"],
-            context_mask=batch["context_mask"],
+            chunk_ids=batch["chunk_ids"],
+            chunk_mask=batch["chunk_mask"],
             prompt_ids=batch["prompt_ids"],
             prompt_mask=batch["prompt_mask"],
             target_ids=batch["target_ids"],
@@ -910,6 +910,7 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
                 "effective_batch_size": actual_ebs,
                 "max_epochs": config.stage2_max_epochs,
                 "max_context_len": config.stage2_max_context_len,
+                "chunk_len": config.stage2_chunk_len,
                 "max_prompt_len": config.stage2_max_prompt_len,
                 "max_answer_len": config.stage2_max_answer_len,
                 "total_trainable": counts["total_trainable"],
@@ -935,6 +936,7 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         tokenizer=tokenizer,
         batch_size=per_gpu_bs,
         max_context_len=config.stage2_max_context_len,
+        chunk_len=config.stage2_chunk_len,
         max_prompt_len=config.stage2_max_prompt_len,
         max_answer_len=config.stage2_max_answer_len,
         num_workers=config.num_workers,
@@ -944,6 +946,7 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         tokenizer=tokenizer,
         batch_size=per_gpu_bs,
         max_context_len=config.stage2_max_context_len,
+        chunk_len=config.stage2_chunk_len,
         max_prompt_len=config.stage2_max_prompt_len,
         max_answer_len=config.stage2_max_answer_len,
         num_workers=config.num_workers,
@@ -1014,8 +1017,8 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
         for step, batch in enumerate(train_loader):
             with accelerator.accumulate(model):
                 result = model(
-                    context_ids=batch["context_ids"],
-                    context_mask=batch["context_mask"],
+                    chunk_ids=batch["chunk_ids"],
+                    chunk_mask=batch["chunk_mask"],
                     prompt_ids=batch["prompt_ids"],
                     prompt_mask=batch["prompt_mask"],
                     target_ids=batch["target_ids"],
