@@ -62,8 +62,8 @@ def infer_config_from_state_dict(state: dict, config: QCPCConfig) -> QCPCConfig:
 
     PerceiverIO state dict keys (from perceiver.state_dict()):
       latent.z_base          — (M, D)
-      pe_latent              — (M, D)  [only when use_decoupled_rope=False]
-      pe_text                — (N_max, D) [only when use_decoupled_rope=False]
+      pe_latent              — (M, D)
+      pe_text                — (N_max, D)
       latent.query_mapper.*  — [only when use_prompt_bias=True]
       latent.alpha           — [only when use_prompt_bias=True]
       read_block.*
@@ -83,9 +83,6 @@ def infer_config_from_state_dict(state: dict, config: QCPCConfig) -> QCPCConfig:
         if D in HIDDEN_DIM_TO_QWEN:
             config.qwen3_model_path = HIDDEN_DIM_TO_QWEN[D]
         logger.info(f"Inferred from checkpoint: M={M}, D={D}, model={config.qwen3_model_path}")
-
-    # use_decoupled_rope=True uses slot_pe; False uses pe_latent/pe_text
-    config.use_decoupled_rope = "pe_latent" not in state and any("slot_pe" in k for k in state)
 
     # use_prompt_bias=True creates query_mapper and alpha inside latent
     config.use_prompt_bias = any("query_mapper" in k for k in state)
@@ -328,7 +325,7 @@ def main():
     logger.info(
         f"Config: model={config.qwen3_model_path}, M={config.num_memory_tokens}, "
         f"D={config.hidden_dim}, L_proc={config.num_process_layers}, "
-        f"rope={config.use_decoupled_rope}, bias={config.use_prompt_bias}"
+        f"bias={config.use_prompt_bias}"
     )
 
     # Accelerator (create early to know device/rank)

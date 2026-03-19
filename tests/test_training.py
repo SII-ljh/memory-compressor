@@ -28,13 +28,11 @@ def _make_config(**kwargs):
         hidden_dim=D,
         num_heads=16,
         head_dim=64,
-        rope_dim=64,
         num_memory_tokens=M,
         num_process_layers=2,
         query_mapper_mid_dim=512,
         ffn_intermediate_dim=2048,
         max_position_embeddings=128,
-        use_decoupled_rope=True,
         use_prompt_bias=False,
     )
     defaults.update(kwargs)

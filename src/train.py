@@ -71,14 +71,7 @@ logger = logging.getLogger(__name__)
 
 def _mode_name(config: QCPCConfig) -> str:
     """Derive a human-readable mode name from config switches."""
-    if config.use_decoupled_rope and config.use_prompt_bias:
-        return "full"
-    elif config.use_decoupled_rope:
-        return "rope"
-    elif config.use_prompt_bias:
-        return "bias"
-    else:
-        return "baseline"
+    return "bias" if config.use_prompt_bias else "baseline"
 
 
 def _find_latest_checkpoint(ckpt_dir: Path) -> Path | None:
@@ -291,7 +284,6 @@ def train_stage1a(config: QCPCConfig, resume_path: str | None = None):
     Target: 128 tokens continuation, loss on target only
     """
     logger.info("=== Stage 1a: Short Window Warmup (Single-Chunk) ===")
-    logger.info(f"use_decoupled_rope={config.use_decoupled_rope}")
     logger.info(f"context_len={config.stage1a_max_context_len}, cont_len={config.stage1a_max_cont_len}")
 
     # Build model
@@ -339,7 +331,6 @@ def train_stage1a(config: QCPCConfig, resume_path: str | None = None):
                 "stage": "1a",
                 "mode": mode,
                 "backbone": qwen_name,
-                "use_decoupled_rope": config.use_decoupled_rope,
                 "use_prompt_bias": False,
                 "hidden_dim": config.hidden_dim,
                 "num_memory_tokens": config.num_memory_tokens,
@@ -544,7 +535,6 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
     T = config.stage1b_max_cont_len
 
     logger.info("=== Stage 1b: Long Window Multi-Chunk Training ===")
-    logger.info(f"use_decoupled_rope={config.use_decoupled_rope}")
     logger.info(f"chunks=[{K_min},{K_max}], chunk_len={N}, cont_len={T}")
 
     # Build model
@@ -620,7 +610,6 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
                 "stage": "1b",
                 "mode": mode,
                 "backbone": qwen_name,
-                "use_decoupled_rope": config.use_decoupled_rope,
                 "use_prompt_bias": False,
                 "hidden_dim": config.hidden_dim,
                 "num_memory_tokens": config.num_memory_tokens,
@@ -813,7 +802,7 @@ def train_stage1b(config: QCPCConfig, resume_path: str | None = None):
 def train_stage2(config: QCPCConfig, resume_path: str | None = None):
     """Stage 2: QA instruction finetuning."""
     logger.info("=== Stage 2: QA Instruction Finetuning ===")
-    logger.info(f"use_decoupled_rope={config.use_decoupled_rope}, use_prompt_bias={config.use_prompt_bias}")
+    logger.info(f"use_prompt_bias={config.use_prompt_bias}")
 
     # Build model with prompt bias enabled
     config.use_prompt_bias = True
@@ -897,7 +886,6 @@ def train_stage2(config: QCPCConfig, resume_path: str | None = None):
                 "stage": 2,
                 "mode": mode,
                 "backbone": qwen_name,
-                "use_decoupled_rope": config.use_decoupled_rope,
                 "use_prompt_bias": True,
                 "hidden_dim": config.hidden_dim,
                 "num_memory_tokens": config.num_memory_tokens,

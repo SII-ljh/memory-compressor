@@ -17,9 +17,9 @@ class QCPC(nn.Module):
     2. Perceiver IO: compress N embeddings → M memory tokens O(M*N)
     3. Frozen Decoder: [<MEM>, memory, </MEM>, prompt] → LLM generation
 
-    Two boolean switches control 4 operating modes:
-    - use_decoupled_rope: standard learnable PE vs decoupled RoPE
-    - use_prompt_bias: whether to inject query-conditioned latent bias
+    Two operating modes controlled by use_prompt_bias:
+    - Baseline (use_prompt_bias=False): pure learnable latent
+    - Prompt Bias (use_prompt_bias=True): query-conditioned latent bias
     """
 
     def __init__(self, config: QCPCConfig):

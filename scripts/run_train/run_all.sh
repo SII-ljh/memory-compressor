@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run Stage-1 and/or Stage-2 ablation experiments sequentially.
 #
-# Experiment matrix (baseline perceiver, no RoPE, no bias):
+# Experiment matrix (baseline perceiver, learnable PE):
 #   Decoder ablation (fix M=128):  Qwen3-0.6B / 1.7B / 4B
 #   Latent  ablation (fix 0.6B):   M=64 / 128 / 256
 #   (0.6B + M=128 is shared → 5 unique runs)

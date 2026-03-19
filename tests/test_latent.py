@@ -105,17 +105,14 @@ def test_latent_gradient_flow():
     print("[PASS] test_latent_gradient_flow")
 
 
-def test_all_four_combos():
-    """Test all 4 config combinations produce correct output shapes."""
+def test_both_combos():
+    """Test both config combinations produce correct output shapes."""
     combos = [
-        (False, False, "Baseline"),
-        (False, True, "Perceiver IO + Prompt Bias"),
-        (True, False, "Decoupled RoPE"),
-        (True, True, "Full Model"),
+        (False, "Baseline"),
+        (True, "Prompt Bias"),
     ]
-    for rope, bias, name in combos:
+    for bias, name in combos:
         cfg = QCPCConfig(
-            use_decoupled_rope=rope,
             use_prompt_bias=bias,
             num_memory_tokens=M,
             hidden_dim=D,
@@ -126,7 +123,7 @@ def test_all_four_combos():
         Z = latent(batch_size=B, prompt_embeds=prompt_embeds)
         assert Z.shape == (B, M, D), f"{name}: shape mismatch"
         print(f"  [PASS] {name}: Z shape = {Z.shape}")
-    print("[PASS] test_all_four_combos")
+    print("[PASS] test_both_combos")
 
 
 if __name__ == "__main__":
@@ -136,5 +133,5 @@ if __name__ == "__main__":
     test_latent_with_bias()
     test_latent_with_bias_and_mask()
     test_latent_gradient_flow()
-    test_all_four_combos()
+    test_both_combos()
     print("\n=== All latent tests PASSED ===")

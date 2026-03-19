@@ -22,13 +22,11 @@ def _make_config(**kwargs):
         hidden_dim=D,
         num_heads=16,
         head_dim=64,
-        rope_dim=64,
         num_memory_tokens=M,
         num_process_layers=2,
         query_mapper_mid_dim=512,
         ffn_intermediate_dim=2048,
         max_position_embeddings=128,
-        use_decoupled_rope=True,
         use_prompt_bias=True,
         stage2_chunk_len=64,
     )
@@ -118,16 +116,14 @@ def test_generate_batch():
     Path(ckpt_path).unlink()
 
 
-def test_all_four_combos_inference():
-    """Test inference works for all 4 mode combinations."""
+def test_both_combos_inference():
+    """Test inference works for both mode combinations."""
     combos = [
-        (False, False, "Baseline"),
-        (False, True, "PE + Bias"),
-        (True, False, "RoPE only"),
-        (True, True, "Full Model"),
+        (False, "Baseline"),
+        (True, "Prompt Bias"),
     ]
-    for rope, bias, name in combos:
-        cfg = _make_config(use_decoupled_rope=rope, use_prompt_bias=bias)
+    for bias, name in combos:
+        cfg = _make_config(use_prompt_bias=bias)
         ckpt_path = _save_dummy_checkpoint(cfg)
         inferencer = QCPCInference(cfg, ckpt_path, device=torch.device("cpu"))
 
@@ -138,7 +134,7 @@ def test_all_four_combos_inference():
         print(f"  [PASS] {name}")
 
         Path(ckpt_path).unlink()
-    print("[PASS] test_all_four_combos_inference")
+    print("[PASS] test_both_combos_inference")
 
 
 if __name__ == "__main__":
@@ -146,5 +142,5 @@ if __name__ == "__main__":
     test_generate()
     test_generate_no_question()
     test_generate_batch()
-    test_all_four_combos_inference()
+    test_both_combos_inference()
     print("\n=== All inference tests PASSED ===")

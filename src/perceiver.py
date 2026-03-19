@@ -15,9 +15,7 @@ class PerceiverIO(nn.Module):
                 long text embeddings E_X (N tokens). O(M*N).
     Process stage: L_proc layers of self-attention among M latent tokens. O(M^2).
 
-    Supports two position encoding modes:
-    - use_decoupled_rope=False: Learnable PE injected once at input level.
-    - use_decoupled_rope=True: Decoupled RoPE applied at every layer.
+    Uses learnable positional embeddings injected once at input level.
     """
 
     def __init__(self, config: QCPCConfig):
@@ -28,17 +26,15 @@ class PerceiverIO(nn.Module):
         # Latent array (Z_base + optional prompt bias)
         self.latent = LatentArray(config)
 
-        # Learnable positional embeddings (Mode A only)
-        self.use_decoupled_rope = config.use_decoupled_rope
-        if not config.use_decoupled_rope:
-            self.pe_text = nn.Parameter(
-                torch.zeros(config.max_position_embeddings, D)
-            )
-            self.pe_latent = nn.Parameter(
-                torch.zeros(config.num_memory_tokens, D)
-            )
-            nn.init.trunc_normal_(self.pe_text, std=config.init_scale, a=-2*config.init_scale, b=2*config.init_scale)
-            nn.init.trunc_normal_(self.pe_latent, std=config.init_scale, a=-2*config.init_scale, b=2*config.init_scale)
+        # Learnable positional embeddings
+        self.pe_text = nn.Parameter(
+            torch.zeros(config.max_position_embeddings, D)
+        )
+        self.pe_latent = nn.Parameter(
+            torch.zeros(config.num_memory_tokens, D)
+        )
+        nn.init.trunc_normal_(self.pe_text, std=config.init_scale, a=-2*config.init_scale, b=2*config.init_scale)
+        nn.init.trunc_normal_(self.pe_latent, std=config.init_scale, a=-2*config.init_scale, b=2*config.init_scale)
 
         # Read stage: single cross-attention block
         self.read_block = AttentionBlock(config)
@@ -79,10 +75,9 @@ class PerceiverIO(nn.Module):
             prompt_mask=prompt_mask,
         )  # (B, M, D)
 
-        # Add learnable PE (Mode A only)
-        if not self.use_decoupled_rope:
-            text_embeds = text_embeds + self.pe_text[:N]  # (B, N, D)
-            Z = Z + self.pe_latent  # (B, M, D)
+        # Add learnable PE
+        text_embeds = text_embeds + self.pe_text[:N]  # (B, N, D)
+        Z = Z + self.pe_latent  # (B, M, D)
 
         # Convert mask for attention: 1=valid → True=ignore for masked positions
         key_padding_mask = None

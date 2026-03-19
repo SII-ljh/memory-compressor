@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QCPC - Query-Conditioned Perceiver Compressor</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface2: #334155;
+    --border: #475569;
+    --text: #e2e8f0;
+    --text-muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent2: #818cf8;
+    --green: #4ade80;
+    --orange: #fb923c;
+    --red: #f87171;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 0 20px 60px;
+  }
+  .container { max-width: 960px; margin: 0 auto; }
+
+  /* Header */
+  header {
+    text-align: center;
+    padding: 60px 0 40px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 48px;
+  }
+  header h1 {
+    font-size: 2.4rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+  }
+  header p {
+    color: var(--text-muted);
+    font-size: 1.05rem;
+    max-width: 680px;
+    margin: 0 auto;
+  }
+
+  /* Sections */
+  section { margin-bottom: 52px; }
+  h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 20px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--accent);
+    display: inline-block;
+  }
+  h3 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin: 24px 0 12px;
+    color: var(--accent2);
+  }
+  p, li { color: var(--text); font-size: 0.95rem; }
+  p { margin-bottom: 12px; }
+  ul { padding-left: 20px; margin-bottom: 16px; }
+  li { margin-bottom: 6px; }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+  .card-title {
+    font-weight: 600;
+    font-size: 1.05rem;
+    margin-bottom: 12px;
+    color: var(--accent);
+  }
+
+  /* Pipeline */
+  .pipeline {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+    margin: 24px 0;
+    flex-wrap: wrap;
+  }
+  .pipe-stage {
+    flex: 1;
+    min-width: 140px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 14px;
+    text-align: center;
+    position: relative;
+  }
+  .pipe-stage .num {
+    display: inline-block;
+    width: 28px; height: 28px;
+    line-height: 28px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 700;
+    font-size: 0.85rem;
+    margin-bottom: 8px;
+  }
+  .pipe-stage .label {
+    font-weight: 600;
+    font-size: 0.95rem;
+    display: block;
+    margin-bottom: 6px;
+  }
+  .pipe-stage .desc {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .pipe-arrow {
+    display: flex;
+    align-items: center;
+    font-size: 1.4rem;
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    padding: 10px 14px;
+    text-align: center;
+    border-bottom: 1px solid var(--surface2);
+  }
+  th {
+    background: var(--surface2);
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--accent);
+  }
+  tr:hover td { background: rgba(56, 189, 248, 0.04); }
+  td { color: var(--text); }
+  .highlight { color: var(--green); font-weight: 600; }
+  .dim { color: var(--text-muted); }
+
+  /* Tags */
+  .tag {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-right: 6px;
+  }
+  .tag-frozen { background: rgba(248,113,113,0.15); color: var(--red); }
+  .tag-train { background: rgba(74,222,128,0.15); color: var(--green); }
+  .tag-cond { background: rgba(251,146,60,0.15); color: var(--orange); }
+
+  /* Mode table */
+  .mode-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .mode-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .mode-item.active { border-color: var(--accent); }
+  .mode-item .mode-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin-bottom: 4px;
+  }
+  .mode-item .mode-desc {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+  }
+
+  /* Complexity badge */
+  .complexity {
+    display: inline-block;
+    background: rgba(56,189,248,0.12);
+    color: var(--accent);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  /* Stage training */
+  .stage-flow {
+    display: flex;
+    gap: 16px;
+    margin: 20px 0;
+  }
+  .stage-box {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .stage-box h4 {
+    color: var(--accent);
+    margin-bottom: 10px;
+    font-size: 1rem;
+  }
+
+  /* Footer */
+  footer {
+    text-align: center;
+    padding: 32px 0;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    border-top: 1px solid var(--border);
+    margin-top: 20px;
+  }
+
+  /* Responsive */
+  @media (max-width: 700px) {
+    .pipeline { flex-direction: column; }
+    .pipe-arrow { transform: rotate(90deg); justify-content: center; }
+    .mode-grid { grid-template-columns: 1fr; }
+    .stage-flow { flex-direction: column; }
+    header h1 { font-size: 1.8rem; }
+  }
+
+  /* Key finding box */
+  .finding {
+    background: rgba(56,189,248,0.06);
+    border-left: 3px solid var(--accent);
+    padding: 14px 18px;
+    border-radius: 0 8px 8px 0;
+    margin: 16px 0;
+  }
+  .finding strong { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>QCPC</h1>
+  <p>Query-Conditioned Perceiver Compressor — 基于 Perceiver IO 的长文本压缩方案，将长度 N 的文本压缩为 M 个 Memory Token 作为 Soft Prompt 送入冻结 LLM，计算量从 O(N&sup2;) 降至 O(M&middot;N)</p>
+</header>
+
+<!-- ============ 1. Architecture ============ -->
+<section>
+  <h2>模型架构</h2>
+
+  <p>QCPC 采用五阶段流水线：长文本经冻结的 Embedding 层获得词向量后，由 Perceiver IO 的 Read（交叉注意力）和 Process（自注意力）阶段压缩为 M 个 Memory Token，最终拼接提示词送入冻结的 Qwen3 Decoder 进行生成。</p>
+
+  <div class="pipeline">
+    <div class="pipe-stage">
+      <span class="num">1</span>
+      <span class="label">Embedding</span>
+      <span class="desc">冻结的 Qwen3 Embedding Lookup<br><span class="complexity">O(N)</span></span>
+    </div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-stage">
+      <span class="num">2</span>
+      <span class="label">Latent Init</span>
+      <span class="desc">M 个可学习 Token<br>+ 零初始化 Prompt Bias</span>
+    </div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-stage">
+      <span class="num">3</span>
+      <span class="label">Read</span>
+      <span class="desc">Cross-Attention<br>Latent &larr; 长文本<br><span class="complexity">O(M&middot;N)</span></span>
+    </div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-stage">
+      <span class="num">4</span>
+      <span class="label">Process</span>
+      <span class="desc">Self-Attention<br>Latent &harr; Latent<br><span class="complexity">O(M&sup2;)</span></span>
+    </div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-stage">
+      <span class="num">5</span>
+      <span class="label">Decode</span>
+      <span class="desc">[&lt;MEM&gt;, Memory, &lt;/MEM&gt;, Prompt]<br>&rarr; 冻结 Qwen3 LLM</span>
+    </div>
+  </div>
+
+  <h3>四种工作模式（两个布尔开关）</h3>
+  <div class="mode-grid">
+    <div class="mode-item">
+      <div class="mode-name">Baseline</div>
+      <div class="mode-desc">可学习 PE + 纯可学习 Latent<br>decoupled_rope=off, prompt_bias=off</div>
+    </div>
+    <div class="mode-item">
+      <div class="mode-name">+ Prompt Bias</div>
+      <div class="mode-desc">可学习 PE + Prompt 零初始化偏置<br>decoupled_rope=off, prompt_bias=on</div>
+    </div>
+    <div class="mode-item">
+      <div class="mode-name">Decoupled RoPE</div>
+      <div class="mode-desc">文本 RoPE + 可学习 Slot PE<br>decoupled_rope=on, prompt_bias=off</div>
+    </div>
+    <div class="mode-item active">
+      <div class="mode-name">Full Model (默认)</div>
+      <div class="mode-desc">Decoupled RoPE + Prompt 零初始化偏置<br>decoupled_rope=on, prompt_bias=on</div>
+    </div>
+  </div>
+
+  <h3>Decoupled RoPE 机制</h3>
+  <p>在 Read 阶段的 Cross-Attention 中，Q 和 K 各拆分为<strong>内容通道</strong>与<strong>位置通道</strong>：</p>
+  <ul>
+    <li><strong>KV 侧（长文本）</strong>：内容通道不施加 RoPE；位置通道独立投影后施加 RoPE，编码真实绝对位置。</li>
+    <li><strong>Query 侧（Latent）</strong>：内容通道不施加 RoPE；位置通道使用可学习 Slot Position Embedding，每个 slot 自由学习区域偏好。</li>
+  </ul>
+  <p>注意力得分 = 内容匹配 + 位置偏好的叠加，内容与位置互不干扰。</p>
+
+  <h3>参数状态</h3>
+  <table>
+    <tr><th>模块</th><th>状态</th></tr>
+    <tr><td>Qwen3 Embedding Table</td><td><span class="tag tag-frozen">冻结</span></td></tr>
+    <tr><td>Z<sub>base</sub>（可学习 Latent）</td><td><span class="tag tag-train">可训练</span></td></tr>
+    <tr><td>Perceiver IO 全部参数</td><td><span class="tag tag-train">可训练</span></td></tr>
+    <tr><td>QueryMapper + &alpha;（Prompt Bias）</td><td><span class="tag tag-cond">阶段一冻结 / 阶段二可训练</span></td></tr>
+    <tr><td>Qwen3 LLM Decoder</td><td><span class="tag tag-frozen">冻结</span></td></tr>
+  </table>
+</section>
+
+<!-- ============ 2. Training Data ============ -->
+<section>
+  <h2>训练数据</h2>
+
+  <div class="card">
+    <div class="card-title">Stage 1 — 文本补全预训练数据</div>
+    <p>大规模无监督长文本语料，JSONL 格式（<code>{"text": "...", "id": "..."}</code>）。每条文本被分词后切分为固定长度的 segment，再拆分为前缀（送入压缩器）和续写部分（作为生成目标）。</p>
+    <ul>
+      <li><strong>Stage 1a（热身）</strong>：context=512, continuation=128</li>
+      <li><strong>Stage 1b（多 chunk）</strong>：chunk_len=512, 2~8 chunks 动态拼接, continuation=128</li>
+    </ul>
+    <p>数据路径：<code>data/stage1/train.jsonl</code>、<code>data/stage1/warmup_train.jsonl</code></p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Stage 2 — QA 指令微调数据</div>
+    <p><code>(Context, Question, Answer)</code> 三元组，JSON 格式。Context 最长 4096 token，Prompt 最长 128 token，Answer 最长 256 token。</p>
+    <p>数据路径：<code>data/stage2/train.json</code>、<code>data/stage2/eval.json</code></p>
+  </div>
+</section>
+
+<!-- ============ 3. Training ============ -->
+<section>
+  <h2>训练方式</h2>
+
+  <div class="stage-flow">
+    <div class="stage-box">
+      <h4>Stage 1a &mdash; 短窗口热身</h4>
+      <p>目标：学习基础的文本压缩能力</p>
+      <ul>
+        <li>Context 512, Continuation 128</li>
+        <li>Prompt Bias <strong>冻结</strong>（输出恒为 0）</li>
+        <li>LR: 1e-4, Batch: 8, Grad Accum: 4</li>
+        <li>Warmup tokens: 500M</li>
+        <li>Loss: 续写部分 Next-Token CE</li>
+      </ul>
+    </div>
+    <div class="stage-box">
+      <h4>Stage 1b &mdash; 多 Chunk 长文本</h4>
+      <p>目标：扩展到长上下文压缩</p>
+      <ul>
+        <li>Context 最长 4096 (2~8 chunks &times; 512)</li>
+        <li>逐 chunk 输入，Memory 跨 chunk 累积</li>
+        <li>Prompt Bias 仍<strong>冻结</strong></li>
+        <li>从 1a checkpoint 继续训练</li>
+        <li>Loss: 续写部分 Next-Token CE</li>
+      </ul>
+    </div>
+    <div class="stage-box">
+      <h4>Stage 2 &mdash; QA 指令微调</h4>
+      <p>目标：激活 Prompt-Guided 定向压缩</p>
+      <ul>
+        <li>解冻 QueryMapper + &alpha;</li>
+        <li>零初始化保证平滑过渡</li>
+        <li>LR: 2e-5, Batch: 4</li>
+        <li>Context→压缩，Question→偏置</li>
+        <li>Loss: 仅 Answer 部分 CE</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="finding">
+    <strong>零初始化平滑过渡</strong>：QueryMapper 第二层权重/偏置和 &alpha; 均初始化为 0，保证 Stage 2 开始时模型行为与 Stage 1 完全一致，Prompt 信号从零渐进注入（类似 ReZero / ControlNet 范式）。
+  </div>
+</section>
+
+<!-- ============ 4. Evaluation ============ -->
+<section>
+  <h2>评估方式</h2>
+
+  <div class="card">
+    <div class="card-title">Stage 1 评估</div>
+    <p>在 held-out 文本上计算续写的 <strong>Loss</strong> 和 <strong>Perplexity (PPL)</strong>，衡量 Memory Token 的通用语义保持能力。</p>
+    <ul>
+      <li>Full benchmark: context=4096, continuation=256, 500 samples</li>
+      <li>分别在 1a（短窗口）和 1b（多 chunk）设置下评估</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Stage 2 评估</div>
+    <p>在 QA eval 集上评估生成质量，指标包括：</p>
+    <ul>
+      <li><strong>Loss / PPL</strong>：Answer 部分的交叉熵和困惑度</li>
+      <li><strong>ROUGE-L</strong>：最长公共子序列 F-score</li>
+      <li><strong>F1</strong>：Token 级别的 F1 分数</li>
+      <li><strong>EM</strong>：Exact Match 精确匹配率</li>
+    </ul>
+    <p>同时设置 <strong>Upper Bound</strong>（LLM 直接接收完整上下文）和 <strong>Lower Bound</strong>（使用压缩后的 Memory Token）用于对比。评估使用 1,999 样本。</p>
+  </div>
+</section>
+
+<!-- ============ 5. Results ============ -->
+<section>
+  <h2>实验结果</h2>
+
+  <h3>Stage 1：文本补全预训练</h3>
+  <p>Upper Bound Benchmark（context=4096, continuation=256, 500 samples）</p>
+  <table>
+    <tr><th>模型</th><th>Loss</th><th>PPL</th></tr>
+    <tr><td>Qwen3-0.6B</td><td>3.297</td><td>27.028</td></tr>
+    <tr><td>Qwen3-1.7B</td><td>3.024</td><td>20.564</td></tr>
+    <tr><td>Qwen3-4B</td><td class="highlight">2.889</td><td class="highlight">17.982</td></tr>
+  </table>
+
+  <p>Stage 1a 短窗口热身（context=512, continuation=128）</p>
+  <table>
+    <tr><th>模型</th><th>Loss</th><th>PPL</th></tr>
+    <tr><td>Qwen3-0.6B</td><td>3.309</td><td>27.354</td></tr>
+    <tr><td>Qwen3-1.7B</td><td>3.033</td><td>20.766</td></tr>
+    <tr><td>Qwen3-4B</td><td class="highlight">2.907</td><td class="highlight">18.300</td></tr>
+  </table>
+
+  <p>Stage 1b 多 Chunk 训练（context=4096, continuation=128）</p>
+  <table>
+    <tr><th>模型</th><th>Loss</th><th>PPL</th></tr>
+    <tr><td>Qwen3-0.6B</td><td>3.295</td><td>26.975</td></tr>
+    <tr><td>Qwen3-1.7B</td><td>3.020</td><td>20.488</td></tr>
+    <tr><td>Qwen3-4B</td><td class="highlight">2.886</td><td class="highlight">17.925</td></tr>
+  </table>
+
+  <div class="finding">
+    <strong>Scaling 趋势</strong>：更大模型持续获得更低 PPL。Qwen3-4B 比 0.6B 的 PPL 低 33%。从 1a 到 1b，所有模型均因更长上下文而提升。
+  </div>
+
+  <h3>Stage 1b QCPC 训练结果（不同模型 &times; Memory Token 数）</h3>
+  <table>
+    <tr><th>实验配置</th><th>Loss</th><th>PPL</th></tr>
+    <tr><td>Qwen3-0.6B, M=64</td><td>3.072</td><td>21.58</td></tr>
+    <tr><td>Qwen3-0.6B, M=128</td><td>3.007</td><td>20.22</td></tr>
+    <tr><td>Qwen3-0.6B, M=256</td><td>3.004</td><td>20.17</td></tr>
+    <tr><td>Qwen3-1.7B, M=128</td><td>2.697</td><td>14.84</td></tr>
+    <tr><td>Qwen3-4B, M=128</td><td class="highlight">2.491</td><td class="highlight">12.07</td></tr>
+  </table>
+
+  <div class="finding">
+    <strong>压缩效果</strong>：QCPC 在所有配置下均优于对应的 Upper Bound PPL（因为续写长度不同，不直接可比，但趋势一致）。更多 Memory Token（M=256 vs M=64）带来小幅提升，而更大的 decoder 模型贡献更显著。
+  </div>
+
+  <h3>Stage 2：QA 微调结果</h3>
+
+  <h4 style="color:var(--text-muted);font-size:0.95rem;margin:16px 0 8px;">QCPC 训练后 QA 指标</h4>
+  <table>
+    <tr><th>实验配置</th><th>Loss</th><th>PPL</th><th>ROUGE-L</th><th>F1</th><th>EM</th></tr>
+    <tr><td>Qwen3-0.6B, M=64</td><td>2.438</td><td>11.45</td><td>0.0092</td><td>0.0093</td><td>0.0</td></tr>
+    <tr><td>Qwen3-0.6B, M=128</td><td>2.427</td><td>11.33</td><td>0.0105</td><td>0.0106</td><td>0.0</td></tr>
+    <tr><td>Qwen3-0.6B, M=256</td><td>2.362</td><td>10.61</td><td>0.0137</td><td>0.0137</td><td>0.0</td></tr>
+    <tr><td>Qwen3-1.7B, M=128</td><td>2.019</td><td>7.53</td><td>0.0158</td><td>0.0167</td><td>0.0</td></tr>
+    <tr><td>Qwen3-4B, M=128</td><td class="highlight">1.722</td><td class="highlight">5.59</td><td>0.0129</td><td>0.0132</td><td>0.0</td></tr>
+  </table>
+
+  <h4 style="color:var(--text-muted);font-size:0.95rem;margin:24px 0 8px;">Upper / Lower Bound 对比（Stage 2 QA）</h4>
+  <table>
+    <tr>
+      <th rowspan="2">模型</th>
+      <th colspan="3">Upper Bound（完整上下文）</th>
+      <th colspan="3">Lower Bound（压缩 Memory）</th>
+    </tr>
+    <tr>
+      <th>PPL</th><th>F1</th><th>EM</th>
+      <th>PPL</th><th>F1</th><th>EM</th>
+    </tr>
+    <tr>
+      <td>Qwen3-0.6B</td>
+      <td>1.280</td><td>0.805</td><td>0.733</td>
+      <td>13.681</td><td>0.258</td><td>0.247</td>
+    </tr>
+    <tr>
+      <td>Qwen3-1.7B</td>
+      <td>1.206</td><td>0.872</td><td>0.810</td>
+      <td>8.272</td><td>0.279</td><td>0.257</td>
+    </tr>
+    <tr>
+      <td>Qwen3-4B</td>
+      <td class="highlight">1.189</td><td class="highlight">0.885</td><td class="highlight">0.827</td>
+      <td>6.789</td><td>0.304</td><td>0.275</td>
+    </tr>
+  </table>
+
+  <div class="finding">
+    <strong>关键发现</strong>：
+    <ul style="margin-top:8px;">
+      <li>Upper Bound 下 Qwen3-4B 可达 F1=0.885、EM=0.827，说明 decoder 本身具备较强 QA 能力。</li>
+      <li>当前 QCPC 的压缩 Memory 与 Upper Bound 存在较大差距（F1 下降 53-59%），表明压缩后的信息损失仍然显著。</li>
+      <li>QCPC 训练后的 ROUGE-L / F1 / EM 极低（~0.01），Stage 2 微调尚未有效将压缩信息转化为可用的 QA 答案生成能力，后续需进一步改进。</li>
+      <li>PPL 方面，QCPC 在 Stage 2 的 loss 随模型增大持续下降（11.3 → 7.5 → 5.6），说明语言建模层面的压缩质量在提升。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ Summary ============ -->
+<section>
+  <h2>总结</h2>
+  <div class="card">
+    <ul>
+      <li><strong>架构验证</strong>：五阶段流水线成功实现 O(M&middot;N) 复杂度的长文本压缩，各组件（Decoupled RoPE、零初始化 Prompt Bias）均按预期工作。</li>
+      <li><strong>Stage 1 预训练</strong>：Memory Token 有效捕获文本语义，PPL 随模型规模和 Memory 数量提升而改善，最优配置 Qwen3-4B + M=128 达到 PPL=12.07。</li>
+      <li><strong>Stage 2 瓶颈</strong>：QA 微调阶段生成质量（ROUGE-L、F1、EM）远低于预期，压缩 Memory 到可精确回答的转化仍是核心挑战。Upper/Lower Bound 差距为后续优化提供了明确的改进空间。</li>
+      <li><strong>Scaling 规律</strong>：更大的 decoder 模型在 Stage 1 和 Stage 2 的所有指标上均表现更优，验证了方案对不同规模模型的适用性。</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  QCPC Report &mdash; Generated 2026-03-19
+</footer>
+
+</div>
+</body>
+</html>

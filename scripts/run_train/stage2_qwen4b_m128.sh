@@ -9,7 +9,6 @@ NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l | xargs)}
 accelerate launch --num_processes "${NUM_GPUS}" --multi_gpu \
   src/train.py --config config/default.yaml --stage 2 \
   --override \
-    use_decoupled_rope=false \
     qwen3_model_path=./models/Qwen3-4B \
     hidden_dim=2560 \
     num_heads=40 \

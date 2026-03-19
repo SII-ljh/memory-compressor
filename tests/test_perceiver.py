@@ -13,14 +13,12 @@ from src.perceiver import PerceiverIO
 B, N, M, D, L = 2, 64, 8, 1024, 16
 
 
-def _make_config(rope: bool, bias: bool) -> QCPCConfig:
+def _make_config(bias: bool) -> QCPCConfig:
     return QCPCConfig(
-        use_decoupled_rope=rope,
         use_prompt_bias=bias,
         hidden_dim=D,
         num_heads=16,
         head_dim=64,
-        rope_dim=64,
         num_memory_tokens=M,
         num_process_layers=2,  # use 2 for fast testing
         query_mapper_mid_dim=512,
@@ -31,8 +29,8 @@ def _make_config(rope: bool, bias: bool) -> QCPCConfig:
 
 
 def test_perceiver_baseline():
-    """Test baseline mode: no RoPE, no prompt bias."""
-    cfg = _make_config(rope=False, bias=False)
+    """Test baseline mode: no prompt bias."""
+    cfg = _make_config(bias=False)
     model = PerceiverIO(cfg)
 
     text_embeds = torch.randn(B, N, D)
@@ -41,44 +39,21 @@ def test_perceiver_baseline():
     print("[PASS] test_perceiver_baseline")
 
 
-def test_perceiver_rope_only():
-    """Test decoupled RoPE mode without prompt bias."""
-    cfg = _make_config(rope=True, bias=False)
-    model = PerceiverIO(cfg)
-
-    text_embeds = torch.randn(B, N, D)
-    out = model(text_embeds)
-    assert out.shape == (B, M, D)
-    print("[PASS] test_perceiver_rope_only")
-
-
-def test_perceiver_bias_only():
-    """Test prompt bias mode without RoPE."""
-    cfg = _make_config(rope=False, bias=True)
+def test_perceiver_bias():
+    """Test prompt bias mode."""
+    cfg = _make_config(bias=True)
     model = PerceiverIO(cfg)
 
     text_embeds = torch.randn(B, N, D)
     prompt_embeds = torch.randn(B, L, D)
     out = model(text_embeds, prompt_embeds=prompt_embeds)
     assert out.shape == (B, M, D)
-    print("[PASS] test_perceiver_bias_only")
-
-
-def test_perceiver_full_model():
-    """Test full model: decoupled RoPE + prompt bias."""
-    cfg = _make_config(rope=True, bias=True)
-    model = PerceiverIO(cfg)
-
-    text_embeds = torch.randn(B, N, D)
-    prompt_embeds = torch.randn(B, L, D)
-    out = model(text_embeds, prompt_embeds=prompt_embeds)
-    assert out.shape == (B, M, D)
-    print("[PASS] test_perceiver_full_model")
+    print("[PASS] test_perceiver_bias")
 
 
 def test_perceiver_with_masks():
     """Test with both text and prompt masks."""
-    cfg = _make_config(rope=True, bias=True)
+    cfg = _make_config(bias=True)
     model = PerceiverIO(cfg)
 
     text_embeds = torch.randn(B, N, D)
@@ -99,7 +74,7 @@ def test_perceiver_with_masks():
 
 def test_perceiver_gradient_flow():
     """Test gradients flow through the entire Perceiver IO."""
-    cfg = _make_config(rope=True, bias=True)
+    cfg = _make_config(bias=True)
     model = PerceiverIO(cfg)
 
     # Set alpha to non-zero for gradient flow through prompt bias
@@ -119,16 +94,14 @@ def test_perceiver_gradient_flow():
     print("[PASS] test_perceiver_gradient_flow")
 
 
-def test_perceiver_all_four_combos():
-    """Test all 4 config combinations."""
+def test_perceiver_both_combos():
+    """Test both config combinations."""
     combos = [
-        (False, False, "Baseline"),
-        (False, True, "PE + Bias"),
-        (True, False, "RoPE"),
-        (True, True, "Full Model"),
+        (False, "Baseline"),
+        (True, "Prompt Bias"),
     ]
-    for rope, bias, name in combos:
-        cfg = _make_config(rope, bias)
+    for bias, name in combos:
+        cfg = _make_config(bias)
         model = PerceiverIO(cfg)
 
         text_embeds = torch.randn(B, N, D)
@@ -138,16 +111,13 @@ def test_perceiver_all_four_combos():
         assert out.shape == (B, M, D), f"{name}: shape mismatch"
         assert not torch.isnan(out).any(), f"{name}: NaN detected"
         print(f"  [PASS] {name}: {out.shape}")
-    print("[PASS] test_perceiver_all_four_combos")
+    print("[PASS] test_perceiver_both_combos")
 
 
 def test_perceiver_param_count():
     """Print param count for each mode (informational)."""
-    for rope, bias, name in [
-        (False, False, "Baseline"),
-        (True, True, "Full Model"),
-    ]:
-        cfg = _make_config(rope, bias)
+    for bias, name in [(False, "Baseline"), (True, "Prompt Bias")]:
+        cfg = _make_config(bias)
         model = PerceiverIO(cfg)
         total = sum(p.numel() for p in model.parameters())
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -157,11 +127,9 @@ def test_perceiver_param_count():
 
 if __name__ == "__main__":
     test_perceiver_baseline()
-    test_perceiver_rope_only()
-    test_perceiver_bias_only()
-    test_perceiver_full_model()
+    test_perceiver_bias()
     test_perceiver_with_masks()
     test_perceiver_gradient_flow()
-    test_perceiver_all_four_combos()
+    test_perceiver_both_combos()
     test_perceiver_param_count()
     print("\n=== All perceiver tests PASSED ===")

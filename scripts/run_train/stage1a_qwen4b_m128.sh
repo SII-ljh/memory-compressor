@@ -10,8 +10,6 @@ NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L 2>/dev/null | wc -l | xargs)}
 if [[ ${NUM_GPUS} -eq 1 ]]; then
   python src/train.py --config config/default.yaml --stage 1a \
     --override \
-      use_decoupled_rope=false \
-      use_prompt_bias=false \
       qwen3_model_path=./models/Qwen3-4B \
       hidden_dim=2560 \
       num_heads=40 \
@@ -26,8 +24,6 @@ else
     --main_process_port "${MASTER_PORT:-29500}" \
     src/train.py --config config/default.yaml --stage 1a \
     --override \
-      use_decoupled_rope=false \
-      use_prompt_bias=false \
       qwen3_model_path=./models/Qwen3-4B \
       hidden_dim=2560 \
       num_heads=40 \

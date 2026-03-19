@@ -11,24 +11,19 @@ import yaml
 class QCPCConfig:
     """Configuration for the Query-Conditioned Perceiver Compressor model."""
 
-    # --- Mode switches ---
-    use_decoupled_rope: bool = True
+    # --- Mode switch ---
     use_prompt_bias: bool = True
 
     # --- Model dimensions (aligned with Qwen3-0.6B: hidden_size=1024) ---
     hidden_dim: int = 1024          # D: must match Qwen3 embedding dim
     num_heads: int = 16             # n_h: attention heads
     head_dim: int = 64              # d_h: per-head dimension (D / n_h)
-    rope_dim: int = 64              # d_R: decoupled RoPE position channel dim
     num_memory_tokens: int = 128    # M: memory token count
     num_process_layers: int = 6     # L_proc: process self-attention layers
     query_mapper_mid_dim: int = 512 # D_mid: QueryMapper intermediate dim
 
-    # --- Learnable PE (only for use_decoupled_rope=False) ---
+    # --- Learnable PE ---
     max_position_embeddings: int = 32768  # N_max for learnable PE
-
-    # --- RoPE parameters (only for use_decoupled_rope=True) ---
-    rope_theta: float = 1000000.0
 
     # --- FFN ---
     ffn_intermediate_dim: int = 2048  # SwiGLU FFN intermediate dim
@@ -121,7 +116,7 @@ class QCPCConfig:
         """Load config from YAML file."""
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in {f.name for f in cls.__dataclass_fields__.values()}})
 
     @classmethod
     def from_dict(cls, d: dict) -> "QCPCConfig":

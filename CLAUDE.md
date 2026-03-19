@@ -17,7 +17,7 @@ pytest tests/
 pytest tests/test_e2e.py
 
 # Run a specific test
-pytest tests/test_e2e.py::test_forward_rope_bias
+pytest tests/test_e2e.py::test_e2e_baseline_training
 ```
 
 ### Training
@@ -32,13 +32,16 @@ accelerate launch --num_processes 8 --multi_gpu src/train.py --config config/def
 accelerate launch --num_processes 8 --multi_gpu src/train.py --config config/default.yaml --stage 1b
 
 # Stage 2 (QA finetune, loads stage 1b checkpoint)
-accelerate launch --num_processes 8 --multi_gpu src/train.py --config config/default.yaml --stage 2 --resume outputs/full/stage1b/best.pt
+accelerate launch --num_processes 8 --multi_gpu src/train.py --config config/default.yaml --stage 2 --resume outputs/stage1b/best.pt
 
 # Single GPU
 python src/train.py --config config/default.yaml --stage 1a
 
 # Override config values from CLI
 python src/train.py --config config/default.yaml --stage 1a --override auto_batch_size=false
+
+# Baseline mode (no prompt bias)
+python src/train.py --config config/default.yaml --stage 1a --override use_prompt_bias=false
 ```
 
 ### Inference
@@ -56,21 +59,16 @@ python src/inference.py --config config/default.yaml --checkpoint outputs/stage2
 ### Five-Stage Pipeline
 1. **Embedding** — Frozen Qwen3 embedding lookup, O(N)
 2. **Latent Array** — M learnable tokens + optional prompt bias (zero-initialized α·B)
-3. **Read** — Cross-attention: latents query text embeddings, O(M·N)
+3. **Read** — Cross-attention: latents query text embeddings, O(M·N). Learnable PE injected at input level.
 4. **Process** — L_proc self-attention layers among latents, O(M²)
 5. **Decode** — `[<MEM>, memory, </MEM>, prompt]` injected into frozen Qwen3 LLM
 
-### Four Operating Modes (two boolean switches)
+### Two Operating Modes (`use_prompt_bias` switch)
 
-| `use_decoupled_rope` | `use_prompt_bias` | Mode |
-|:---:|:---:|:---|
-| false | false | **Baseline**: learnable PE + learnable latent |
-| false | true | Learnable PE + prompt bias |
-| true | false | Decoupled RoPE (text RoPE + slot PE) |
-| true | true | **Full Model**: Decoupled RoPE + prompt bias |
-
-### Decoupled RoPE
-Text side (K) has a content channel + RoPE position channel. Latent side (Q) has a content channel + learnable slot position embeddings. This lets text keep real absolute positions while latents learn region preferences.
+| `use_prompt_bias` | Mode |
+|:---:|:---|
+| false | **Baseline**: learnable PE + learnable latent |
+| true | **Prompt Bias**: learnable PE + query-conditioned latent bias |
 
 ### Two-Stage Training
 - **Stage 1** (text completion pretrain): 1a short window warmup → 1b multi-chunk. QueryMapper and α frozen (output ≡ 0).
@@ -78,14 +76,14 @@ Text side (K) has a content channel + RoPE position channel. Latent side (Q) has
 
 ### Key Source Files
 - `src/model.py` — Main QCPC model, single/multi-chunk forward, stage management (`set_stage()`)
-- `src/attention.py` — StandardAttention, DecoupledRoPEAttention, AttentionBlock, SwiGLUFFN, RMSNorm, RoPE utils
-- `src/perceiver.py` — PerceiverIO: Read (cross-attn) + Process (self-attn) stages
+- `src/attention.py` — StandardAttention, AttentionBlock, SwiGLUFFN, RMSNorm
+- `src/perceiver.py` — PerceiverIO: Read (cross-attn) + Process (self-attn) stages, learnable PE
 - `src/latent.py` — LatentArray (Z_base + α·B), QueryMapper (2-layer MLP), zero-init
 - `src/decoder.py` — FrozenDecoder wrapping Qwen3, special `<MEM>`/`</MEM>` tokens
 - `src/embedding.py` — Frozen Qwen3 embedding layer
 - `src/data.py` — Dataset classes (PretrainDataset, PretrainMultiChunkDataset, QADataset) and DataLoader factories
 - `src/train.py` — Training script with auto batch size probing, multi-stage training, distributed support
-- `src/config.py` — QCPCConfig dataclass (~90 params), YAML loading, CLI override
+- `src/config.py` — QCPCConfig dataclass, YAML loading, CLI override
 
 ## Conventions
 

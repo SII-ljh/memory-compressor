@@ -1,24 +1,19 @@
 # QCPC Default Configuration
-# Two key switches control 4 operating modes:
-#   use_decoupled_rope=false, use_prompt_bias=false  → Baseline
-#   use_decoupled_rope=false, use_prompt_bias=true   → Perceiver IO + Prompt Bias
-#   use_decoupled_rope=true,  use_prompt_bias=false  → Decoupled RoPE
-#   use_decoupled_rope=true,  use_prompt_bias=true   → Full Model
+# Two operating modes controlled by use_prompt_bias:
+#   use_prompt_bias=false  → Baseline: pure learnable latent
+#   use_prompt_bias=true   → Prompt Bias: query-conditioned latent bias
 
-# --- Mode switches ---
-use_decoupled_rope: true
+# --- Mode switch ---
 use_prompt_bias: true
 
 # --- Model dimensions (aligned with Qwen3-0.6B) ---
 hidden_dim: 1024
 num_heads: 16
 head_dim: 64
-rope_dim: 64
 num_memory_tokens: 128
 num_process_layers: 6
 query_mapper_mid_dim: 512
 max_position_embeddings: 32768
-rope_theta: 1000000.0
 ffn_intermediate_dim: 2048
 init_scale: 0.02
 
@@ -57,6 +52,7 @@ stage2_lr: 2.0e-5
 stage2_batch_size: 4
 stage2_max_epochs: 1
 stage2_max_context_len: 4096
+stage2_chunk_len: 512
 stage2_max_prompt_len: 128
 stage2_max_answer_len: 256
 stage2_warmup_ratio: 0.05
