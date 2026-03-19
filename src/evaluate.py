@@ -159,10 +159,14 @@ def compute_em(prediction: str, reference: str) -> float:
 def eval_loss_ppl(model, eval_loader, accelerator, stage: str):
     """Compute average loss and PPL, aggregated across all GPUs."""
     model.eval()
+    device = accelerator.device
     local_loss = 0.0
     local_count = 0
 
     for batch in eval_loader:
+        # Move batch to model device (accelerator.prepare handles this for
+        # prepared loaders, but be explicit for safety)
+        batch = {k: v.to(device) for k, v in batch.items()}
         if stage == "1b":
             result = model(
                 chunk_ids=batch["chunk_ids"],
@@ -207,16 +211,15 @@ def eval_generation(model, config, eval_data_path, accelerator, max_samples=200)
     """
     from src.inference import QCPCInference
 
-    unwrapped = accelerator.unwrap_model(model)
-    unwrapped.eval()
+    model.eval()
     device = accelerator.device
 
     # Reuse loaded model via QCPCInference wrapper (skip __init__ to avoid reloading)
     inferencer = QCPCInference.__new__(QCPCInference)
     inferencer.config = config
     inferencer.device = device
-    inferencer.model = unwrapped
-    inferencer.tokenizer = unwrapped.decoder.tokenizer
+    inferencer.model = model
+    inferencer.tokenizer = model.decoder.tokenizer
 
     # Load and shard eval data across GPUs
     with open(eval_data_path, "r", encoding="utf-8") as f:
@@ -317,15 +320,18 @@ def main():
         f"rope={config.use_decoupled_rope}, bias={config.use_prompt_bias}"
     )
 
-    # Build model and load weights
+    # Accelerator (create early to know device/rank)
+    accelerator = Accelerator(mixed_precision="no")
+
+    # Build model and load weights — move to device directly (no DDP/FSDP wrap)
     model = QCPC(config)
     stage_num = 1 if args.stage == "1b" else 2
     model.set_stage(stage_num)
     model.perceiver.load_state_dict(ckpt["model"], strict=False)
     del ckpt  # free memory
+    model.to(accelerator.device)
+    model.eval()
 
-    # Accelerator (no mixed precision for eval)
-    accelerator = Accelerator(mixed_precision="no")
     tokenizer = model.decoder.tokenizer
 
     # Resolve eval data path
@@ -367,8 +373,8 @@ def main():
             drop_last=False,
         )
 
-    # Distribute model and dataloader across GPUs
-    model, eval_loader = accelerator.prepare(model, eval_loader)
+    # Only prepare dataloader for distributed data sharding (no model wrapping)
+    eval_loader = accelerator.prepare(eval_loader)
 
     # ── Phase 1: Loss / PPL ──────────────────────────────────
     if accelerator.is_main_process:

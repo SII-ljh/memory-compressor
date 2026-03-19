@@ -5,8 +5,8 @@
 #
 # Usage:
 #   bash scripts/eval_all.sh                           # all experiments, stage1b + stage2
-#   bash scripts/eval_all.sh --stages 2                # stage2 only
-#   bash scripts/eval_all.sh --exp qwen06b_m64,qwen06b_m128
+#   bash scripts/eval_all.sh --stages stage2           # stage2 only
+#   bash scripts/eval_all.sh --exp qwen06b_m64,qwen17b_m128
 #   bash scripts/eval_all.sh --gen_samples 500         # more generation samples
 #   bash scripts/eval_all.sh --num_gpus 4              # fewer GPUs
 #   bash scripts/eval_all.sh --output my_results.txt
@@ -21,7 +21,7 @@ NUM_GPUS=${NUM_GPUS:-8}
 GEN_SAMPLES=200
 BATCH_SIZE=8
 EXPERIMENTS=""
-STAGES="1b,2"
+STAGES="stage1b,stage2"
 OUTPUT_FILE="eval_results.txt"
 
 # ── Parse args ───────────────────────────────────────────────
@@ -37,8 +37,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Parse stages
+# Parse stages into array
 IFS=',' read -ra STAGE_LIST <<< "${STAGES}"
+
+# Map directory name → evaluate.py --stage argument
+declare -A STAGE_TO_ARG=(
+    ["stage1b"]="1b"
+    ["stage2"]="2"
+)
+
+# Validate stage names
+for s in "${STAGE_LIST[@]}"; do
+    if [[ -z "${STAGE_TO_ARG[$s]+x}" ]]; then
+        echo "ERROR: unknown stage '${s}' (valid: stage1b, stage2)"
+        exit 1
+    fi
+done
 
 # ── Discover experiments ─────────────────────────────────────
 if [[ -n "${EXPERIMENTS}" ]]; then
@@ -48,8 +62,8 @@ else
     for d in outputs/*/; do
         [[ ! -d "$d" ]] && continue
         name=$(basename "$d")
-        # Exclude benchmark directory
         [[ "$name" == "benchmark" ]] && continue
+        [[ "$name" == "eval_results" ]] && continue
         EXP_DIRS+=("$name")
     done
 fi
@@ -65,7 +79,7 @@ IFS=$'\n' EXP_DIRS=($(sort <<<"${EXP_DIRS[*]}")); unset IFS
 
 echo "=========================================="
 echo "  QCPC Batch Evaluation"
-echo "  Experiments: ${#EXP_DIRS[@]}"
+echo "  Experiments: ${EXP_DIRS[*]}"
 echo "  Stages: ${STAGES}"
 echo "  GPUs: ${NUM_GPUS}"
 echo "  Gen samples: ${GEN_SAMPLES}"
@@ -96,18 +110,19 @@ for idx in "${!EXP_DIRS[@]}"; do
 
     EXP_DIR="outputs/${exp}"
 
-    for stage in "${STAGE_LIST[@]}"; do
-        CKPT="${EXP_DIR}/${stage}/best.pt"
+    for stage_dir in "${STAGE_LIST[@]}"; do
+        eval_stage="${STAGE_TO_ARG[$stage_dir]}"
+        CKPT="${EXP_DIR}/${stage_dir}/best.pt"
 
         if [[ ! -f "$CKPT" ]]; then
-            echo "  [${stage}] SKIP (no checkpoint: ${CKPT})"
-            echo "[${exp}] Stage ${stage}: SKIPPED (no checkpoint)" >> "$OUTPUT_FILE"
+            echo "  [${stage_dir}] SKIP (no checkpoint: ${CKPT})"
+            echo "[${exp}] ${stage_dir}: SKIPPED (no checkpoint)" >> "$OUTPUT_FILE"
             continue
         fi
 
-        echo "  [${stage}] Evaluating ${CKPT} ..."
-        JSON_OUT="${RESULTS_DIR}/${exp}_${stage}.json"
-        LOG_OUT="${LOGS_DIR}/${exp}_${stage}.log"
+        echo "  [${stage_dir}] Evaluating ${CKPT} ..."
+        JSON_OUT="${RESULTS_DIR}/${exp}_${stage_dir}.json"
+        LOG_OUT="${LOGS_DIR}/${exp}_${stage_dir}.log"
 
         # Build accelerate command
         CMD=(
@@ -116,28 +131,28 @@ for idx in "${!EXP_DIRS[@]}"; do
             --multi_gpu
             src/evaluate.py
             --checkpoint "$CKPT"
-            --stage "${stage}"
+            --stage "${eval_stage}"
             --auto_config
             --batch_size "${BATCH_SIZE}"
             --output_json "$JSON_OUT"
         )
 
         # Add generation samples for stage 2
-        if [[ "$stage" == "2" ]]; then
+        if [[ "$stage_dir" == "stage2" ]]; then
             CMD+=(--gen_samples "${GEN_SAMPLES}")
         fi
 
         # Run evaluation, capture log
         if "${CMD[@]}" > "$LOG_OUT" 2>&1; then
-            echo "  [${stage}] Done. Results: ${JSON_OUT}"
+            echo "  [${stage_dir}] Done → ${JSON_OUT}"
 
             # Append to results file
-            echo "[${exp}] Stage ${stage}:" >> "$OUTPUT_FILE"
+            echo "[${exp}] ${stage_dir}:" >> "$OUTPUT_FILE"
             cat "$JSON_OUT" >> "$OUTPUT_FILE"
             echo "" >> "$OUTPUT_FILE"
         else
-            echo "  [${stage}] FAILED (see ${LOG_OUT})"
-            echo "[${exp}] Stage ${stage}: FAILED (see ${LOG_OUT})" >> "$OUTPUT_FILE"
+            echo "  [${stage_dir}] FAILED (see ${LOG_OUT})"
+            echo "[${exp}] ${stage_dir}: FAILED (see ${LOG_OUT})" >> "$OUTPUT_FILE"
             echo "" >> "$OUTPUT_FILE"
         fi
     done
@@ -147,27 +162,26 @@ done
 {
     echo ""
     echo "================================ SUMMARY ================================"
-    printf "%-20s %-8s %10s %10s %10s %10s %10s\n" \
+    printf "%-20s %-10s %10s %10s %10s %10s %10s\n" \
         "Experiment" "Stage" "Loss" "PPL" "ROUGE-L" "F1" "EM"
     echo "-------------------------------------------------------------------------"
 
     for exp in "${EXP_DIRS[@]}"; do
-        for stage in "${STAGE_LIST[@]}"; do
-            JSON_FILE="${RESULTS_DIR}/${exp}_${stage}.json"
+        for stage_dir in "${STAGE_LIST[@]}"; do
+            JSON_FILE="${RESULTS_DIR}/${exp}_${stage_dir}.json"
             if [[ -f "$JSON_FILE" ]]; then
-                # Extract metrics from JSON
                 read -r LOSS PPL ROUGE F1 EM < <(
                     python3 -c "
-import json, sys
+import json
 d = json.load(open('${JSON_FILE}'))
 print(d.get('loss', '-'), d.get('ppl', '-'), d.get('rouge_l', '-'), d.get('f1', '-'), d.get('em', '-'))
 "
                 )
-                printf "%-20s %-8s %10s %10s %10s %10s %10s\n" \
-                    "$exp" "$stage" "$LOSS" "$PPL" "$ROUGE" "$F1" "$EM"
+                printf "%-20s %-10s %10s %10s %10s %10s %10s\n" \
+                    "$exp" "$stage_dir" "$LOSS" "$PPL" "$ROUGE" "$F1" "$EM"
             else
-                printf "%-20s %-8s %10s %10s %10s %10s %10s\n" \
-                    "$exp" "$stage" "SKIP" "SKIP" "-" "-" "-"
+                printf "%-20s %-10s %10s %10s %10s %10s %10s\n" \
+                    "$exp" "$stage_dir" "SKIP" "SKIP" "-" "-" "-"
             fi
         done
     done
