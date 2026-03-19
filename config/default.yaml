@@ -53,9 +53,9 @@ stage1b_max_cont_len: 128
 stage1b_max_epochs: 3
 
 # --- Training: Stage 2 (QA finetune) ---
-stage2_lr: 5.0e-5
+stage2_lr: 2.0e-5
 stage2_batch_size: 4
-stage2_max_epochs: 5
+stage2_max_epochs: 1
 stage2_max_context_len: 4096
 stage2_max_prompt_len: 128
 stage2_max_answer_len: 256
@@ -78,7 +78,7 @@ sft_eval_data_path: ./data/stage2/eval.json
 
 # --- Logging ---
 log_interval: 50
-eval_interval: 500
+eval_interval: 100
 save_interval: 1000
 output_dir: ./outputs
 wandb_project: qcpc
