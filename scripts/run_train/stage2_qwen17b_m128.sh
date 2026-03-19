@@ -17,5 +17,5 @@ accelerate launch --num_processes "${NUM_GPUS}" --multi_gpu \
     ffn_intermediate_dim=4096 \
     query_mapper_mid_dim=1024 \
     num_memory_tokens=128 \
-    stage2_max_epochs=5 \
+    stage2_max_epochs=1 \
     output_dir=./outputs/qwen17b_m128
