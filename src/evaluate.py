@@ -60,11 +60,18 @@ HIDDEN_DIM_TO_QWEN = {
 def infer_config_from_state_dict(state: dict, config: QCPCConfig) -> QCPCConfig:
     """Auto-detect model config from perceiver state dict shapes.
 
-    Infers: num_memory_tokens, hidden_dim, num_heads, ffn_intermediate_dim,
-            query_mapper_mid_dim, use_decoupled_rope, use_prompt_bias,
-            num_process_layers, qwen3_model_path.
+    PerceiverIO state dict keys (from perceiver.state_dict()):
+      latent.z_base          — (M, D)
+      pe_latent              — (M, D)  [only when use_decoupled_rope=False]
+      pe_text                — (N_max, D) [only when use_decoupled_rope=False]
+      latent.query_mapper.*  — [only when use_prompt_bias=True]
+      latent.alpha           — [only when use_prompt_bias=True]
+      read_block.*
+      process_blocks.{i}.*
+      final_norm.*
     """
-    z_base = state.get("latent_array.z_base")
+    # Infer M and D from latent.z_base: (M, D)
+    z_base = state.get("latent.z_base")
     if z_base is not None:
         M, D = z_base.shape
         config.num_memory_tokens = M
@@ -77,9 +84,13 @@ def infer_config_from_state_dict(state: dict, config: QCPCConfig) -> QCPCConfig:
             config.qwen3_model_path = HIDDEN_DIM_TO_QWEN[D]
         logger.info(f"Inferred from checkpoint: M={M}, D={D}, model={config.qwen3_model_path}")
 
-    config.use_decoupled_rope = any("slot_pe" in k for k in state)
+    # use_decoupled_rope=True uses slot_pe; False uses pe_latent/pe_text
+    config.use_decoupled_rope = "pe_latent" not in state and any("slot_pe" in k for k in state)
+
+    # use_prompt_bias=True creates query_mapper and alpha inside latent
     config.use_prompt_bias = any("query_mapper" in k for k in state)
 
+    # num_process_layers from process_blocks.{i}.*
     proc_indices = [int(k.split(".")[1]) for k in state if k.startswith("process_blocks.")]
     if proc_indices:
         config.num_process_layers = max(proc_indices) + 1
